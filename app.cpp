@@ -71,12 +71,10 @@ WaylandApp &WaylandApp::the() {
  * After creating, use connect() to establish a connection.
  */
 WaylandApp::WaylandApp() {
-    assert(the_app == nullptr);
     the_app = this;
 }
 
 WaylandApp::~WaylandApp() {
-    assert(the_app == this);
     the_app = nullptr;
     disconnect();
 }
@@ -86,10 +84,23 @@ static const struct wl_registry_listener wl_registry_listener_info = {
     .global_remove = WaylandApp::on_registry_handle_global_remove,
 };
 
+static const struct xdg_surface_listener xdg_surface_listener_info = {
+    .configure = WaylandApp::on_xdg_surface_configure,
+};
+
+static const struct xdg_wm_base_listener xdg_wm_base_listener_info = {
+    .ping = WaylandApp::on_xdg_wm_base_ping,
+};
+
+static const struct wl_buffer_listener wl_buffer_listener_info = {
+    .release = WaylandApp::on_buffer_release,
+};
+
 /**
  * Connects to the default Wayland server and creates all needed structures.
  * Returns true on success, false on failure.
  * Error messages are printed on stderr. No messages are produced if successful.
+ * On failure, a best attempt is done to return to clean unconnected state to allow another attempt.
  */
 bool WaylandApp::connect() {
     if (m_display != nullptr) {
@@ -97,14 +108,13 @@ bool WaylandApp::connect() {
     }
     m_display = wl_display_connect(nullptr);
     if (!m_display) {
-        fprintf(stderr, "error: could not connect to Wayland display\n");
+        complain("wl_display_connect() failed, is the server running?");
         return false;
     }
     m_registry = wl_display_get_registry(m_display);
     if (!m_registry) {
-        fprintf(stderr, "error: wl_display_get_registry() failed\n");
-        wl_display_disconnect(m_display);
-        m_display = nullptr;
+        complain("wl_display_get_registry() failed");
+        wl_display_disconnect(m_display); m_display = nullptr;
         return false;
     }
 
@@ -115,32 +125,82 @@ bool WaylandApp::connect() {
     wl_display_roundtrip(m_display);
 
     if (!m_compositor || !m_shm || !m_xdg_wm_base) {
-        fprintf(stderr, "error: missing one of globals (wl_compositor, wl_shm, wl_xdg_wm_base)\n");
-        wl_display_disconnect(m_display);
+        complain("missing one of interfaces: wl_compositor, wl_shm, wl_xdg_wm_base");
+        wl_display_disconnect(m_display); m_display = nullptr;
+        return false;
+    }
+
+    xdg_wm_base_add_listener(m_xdg_wm_base, &xdg_wm_base_listener_info, nullptr);
+
+    m_surface = wl_compositor_create_surface(m_compositor);
+    if (!m_surface) {
+        complain("wl_compositor_create_surface() failed");
+        wl_display_disconnect(m_display); m_display = nullptr;
+        return false;
+    }
+
+    m_xdg_surface = xdg_wm_base_get_xdg_surface(m_xdg_wm_base, m_surface);
+    if (!m_xdg_surface) {
+        complain("xdg_wm_base_get_xdg_surface() failed");
+        wl_surface_destroy(m_surface); m_surface = nullptr;
+        wl_display_disconnect(m_display); m_display = nullptr;
         m_display = nullptr;
         return false;
     }
 
-    m_surface = wl_compositor_create_surface(m_compositor);
-    m_xdg_surface = xdg_wm_base_get_xdg_surface(m_xdg_wm_base, m_surface);
+    xdg_surface_add_listener(m_xdg_surface, &xdg_surface_listener_info, nullptr);
+
     m_xdg_toplevel = xdg_surface_get_toplevel(m_xdg_surface);
+    if (!m_xdg_toplevel) {
+        complain("xdg_surface_get_toplevel() failed");
+        xdg_surface_destroy(m_xdg_surface); m_xdg_surface = nullptr;
+        wl_surface_destroy(m_surface); m_surface = nullptr;
+        wl_display_disconnect(m_display); m_display = nullptr;
+        return false;
+    }
 
     xdg_toplevel_set_title(m_xdg_toplevel, "Example client");
+
+    // render the first frame; without this, we won't get a visible window
+    render_frame();
 
     return true;
 }
 
+/**
+ * Disconnects from the Wayland server.
+ * Attempts to cleanup and return to initial state so that a new connection
+ * is possible if needed - even if the previous connection was only half finished.
+ * Calling with no connection is safe and has no effect.
+ */
 void WaylandApp::disconnect() {
-    if (m_display) {
-        wl_display_disconnect(m_display);
-        m_display = nullptr;
-        m_registry = nullptr;
-        m_compositor = nullptr;
-        m_shm = nullptr;
-        m_xdg_wm_base = nullptr;
-        m_xdg_surface = nullptr;
-        m_xdg_toplevel = nullptr;
+
+    // destroy objects we created (interfaces don't need destruction)
+    if (m_xdg_toplevel) {
+        xdg_toplevel_destroy(m_xdg_toplevel); m_xdg_toplevel = nullptr;
     }
+    if (m_xdg_surface) {
+        xdg_surface_destroy(m_xdg_surface); m_xdg_surface = nullptr;
+    }
+    if (m_surface) {
+        wl_surface_destroy(m_surface); m_surface = nullptr;
+    }
+
+    // after all is cleaned up, disconnect
+    if (m_display) {
+        wl_display_disconnect(m_display); m_display = nullptr;
+    }
+
+    // clean up interface pointers
+    m_registry = nullptr;
+    m_compositor = nullptr;
+    m_shm = nullptr;
+    m_xdg_wm_base = nullptr;
+
+    // reset the rest
+    m_globals.clear();
+    m_window_width = DEFAULT_WINDOW_WIDTH;
+    m_window_height = DEFAULT_WINDOW_HEIGHT;
 }
 
 void WaylandApp::handle_events() {
@@ -154,41 +214,25 @@ void WaylandApp::bind_to_compositor(uint32_t name) {
     assert(m_registry);
     m_compositor = (wl_compositor*)(wl_registry_bind(m_registry, name, &wl_compositor_interface, COMPOSITOR_API_VERSION));
     if (!m_compositor) {
-        fprintf(stderr, "error: wl_registry_bind() failed\n");
+        complain("wl_registry_bind() failed for wl_compositor");
     }
 }
 
 void WaylandApp::bind_to_shm(uint32_t name) {
     assert(m_registry);
     m_shm = (wl_shm*)(wl_registry_bind(m_registry, name, &wl_shm_interface, SHM_API_VERSION));
-
     if (!m_shm) {
-        fprintf(stderr, "error: wl_registry_bind() failed\n");
-        return;
+        complain("wl_registry_bind() failed for wl_shm");
     }
-
-/*
-    m_surface = wl_compositor_create_surface(m_compositor);
-    if (!m_surface) {
-        fprintf(stderr, "error: wl_compositor_create_surface() failed\n");
-        return;
-    }
-*/
 }
-
-static const struct xdg_wm_base_listener xdg_wm_base_listener_info = {
-    .ping = WaylandApp::on_xdg_wm_base_ping,
-};
 
 void WaylandApp::bind_to_xdg_wm_base(uint32_t name) {
     assert(m_registry);
     m_xdg_wm_base = (xdg_wm_base*) wl_registry_bind(m_registry, name, &xdg_wm_base_interface, 1);
-    xdg_wm_base_add_listener(m_xdg_wm_base, &xdg_wm_base_listener_info, nullptr);
+    if (!m_xdg_wm_base) {
+        complain("wm_registry_bind() failed for xdg_wm_base");
+    }
 }
-
-static const struct wl_buffer_listener wl_buffer_listener_info = {
-    .release = WaylandApp::on_buffer_release,
-};
 
 wl_buffer* WaylandApp::allocate_buffer(uint32_t width, uint32_t height) {
     int stride = width * 4;
@@ -196,18 +240,31 @@ wl_buffer* WaylandApp::allocate_buffer(uint32_t width, uint32_t height) {
 
     int fd = allocate_shm_file(size);
     if (fd == -1) {
+        complain("allocate_shm_file() failed");
         return nullptr;
     }
 
     uint32_t *data = (uint32_t*) mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) {
+        complain("mmap() failed for pixel buffer");
         close(fd);
         return nullptr;
     }
 
     assert(m_shm);
     wl_shm_pool *pool = wl_shm_create_pool(m_shm, fd, size);
+    if (!pool) {
+        complain("wl_shm_create_pool() failed");
+        close(fd);
+        return nullptr;
+    }
     wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, WL_SHM_FORMAT_XRGB8888);
+    if (!buffer) {
+        complain("wl_shm_pool_create_buffer() failed");
+        wl_shm_pool_destroy(pool);
+        close(fd);
+        return nullptr;
+    }
     wl_shm_pool_destroy(pool);
     close(fd);
 
@@ -245,6 +302,12 @@ void WaylandApp::register_global(char const* interface, uint32_t name) {
     }
 }
 
+void WaylandApp::present_buffer(wl_buffer* buffer) {
+    assert(m_surface);
+    wl_surface_attach(m_surface, buffer, 0, 0);
+    wl_surface_commit(m_surface);
+}
+
 void WaylandApp::on_xdg_wm_base_ping(void *data, xdg_wm_base *xdg_wm_base, uint32_t serial)
 {
     xdg_wm_base_pong(xdg_wm_base, serial);
@@ -261,13 +324,23 @@ void WaylandApp::on_registry_handle_global_remove(void *data, struct wl_registry
     // This space deliberately left blank
 }
 
-void WaylandApp::present_buffer(wl_buffer* buffer) {
-    assert(m_surface != nullptr);
-    assert(buffer != nullptr);
+void WaylandApp::on_buffer_release(void* data, wl_buffer* buffer) {
+    wl_buffer_destroy(buffer);
+}
+
+void WaylandApp::on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
+    xdg_surface_ack_configure(xdg_surface, serial);
+    wl_buffer* buffer = the_app->allocate_buffer(the_app->m_window_width, the_app->m_window_height);
+    wl_surface_attach(the_app->m_surface, buffer, 0, 0);
+    wl_surface_commit(the_app->m_surface);
+}
+
+void WaylandApp::render_frame() {
+    wl_buffer* buffer = allocate_buffer(m_window_width, m_window_height);
     wl_surface_attach(m_surface, buffer, 0, 0);
     wl_surface_commit(m_surface);
 }
 
-void WaylandApp::on_buffer_release(void* data, wl_buffer* buffer) {
-    wl_buffer_destroy(buffer);
+void WaylandApp::complain(char const* message) {
+    fprintf(stderr, "error: wayland: %s\n", message);
 }
