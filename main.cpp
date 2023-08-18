@@ -7,9 +7,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    while(true) {
-        app.handle_events();
-    }
+    app.enter_event_loop();
 
     app.disconnect();
     return 0;

@@ -79,6 +79,10 @@ WaylandApp::~WaylandApp() {
     disconnect();
 }
 
+static void noop() {
+    /* do nothing */
+}
+
 static const struct wl_registry_listener wl_registry_listener_info = {
     .global = WaylandApp::on_registry_handle_global,
     .global_remove = WaylandApp::on_registry_handle_global_remove,
@@ -94,6 +98,23 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener_info = {
 
 static const struct wl_buffer_listener wl_buffer_listener_info = {
     .release = WaylandApp::on_buffer_release,
+};
+
+static const xdg_toplevel_listener xdg_toplevel_listener_info = {
+    .configure = WaylandApp::on_xdg_toplevel_configure,
+    .close = WaylandApp::on_xdg_toplevel_handle_close,
+};
+
+static const struct wl_pointer_listener pointer_listener = {
+    //.enter = noop,
+    //.leave = noop,
+    //.motion = noop,
+    .button = WaylandApp::on_pointer_handle_button,
+    //.axis = noop,
+};
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = WaylandApp::on_seat_handle_capabilities,
 };
 
 /**
@@ -160,6 +181,7 @@ bool WaylandApp::connect() {
     }
 
     xdg_toplevel_set_title(m_xdg_toplevel, "Example client");
+    xdg_toplevel_add_listener(m_xdg_toplevel, &xdg_toplevel_listener_info, nullptr);
 
     // render the first frame; without this, we won't get a visible window
     render_frame();
@@ -203,9 +225,12 @@ void WaylandApp::disconnect() {
     m_window_height = DEFAULT_WINDOW_HEIGHT;
 }
 
-void WaylandApp::handle_events() {
+/**
+ * Enters the event loop and proceeds handling events until the window is closed.
+ */
+void WaylandApp::enter_event_loop() {
     assert(m_display != nullptr);
-    while (wl_display_dispatch(m_display) != -1) {
+    while (wl_display_dispatch(m_display) != -1 && !m_close_requested) {
         /* This space deliberately left blank */
     }
 }
@@ -304,6 +329,7 @@ void WaylandApp::register_global(char const* interface, uint32_t name) {
 
 void WaylandApp::present_buffer(wl_buffer* buffer) {
     assert(m_surface);
+    assert(buffer);
     wl_surface_attach(m_surface, buffer, 0, 0);
     wl_surface_commit(m_surface);
 }
@@ -331,12 +357,51 @@ void WaylandApp::on_buffer_release(void* data, wl_buffer* buffer) {
 void WaylandApp::on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
     xdg_surface_ack_configure(xdg_surface, serial);
     wl_buffer* buffer = the_app->allocate_buffer(the_app->m_window_width, the_app->m_window_height);
+    if (!buffer) {
+        return;
+    }
     wl_surface_attach(the_app->m_surface, buffer, 0, 0);
     wl_surface_commit(the_app->m_surface);
 }
 
+void WaylandApp::on_xdg_toplevel_handle_close(void* data, struct xdg_toplevel *xdg_toplevel) {
+    the_app->m_close_requested = true;
+}
+
+void WaylandApp::on_xdg_toplevel_configure(void* data, struct xdg_toplevel* xdg_toplevel,
+    int32_t width, int32_t height, struct wl_array *states)
+{
+    if (width != 0) { the_app->m_window_width = width; }
+    if (height != 0) { the_app->m_window_height = height; }
+    //xdg_surface_ack_configure(the_app->m_xdg_surface, serial);
+}
+
+void WaylandApp::on_seat_handle_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities)
+{
+    if (capabilities & WL_SEAT_CAPABILITY_POINTER) {
+        struct wl_pointer *pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(pointer, &pointer_listener, seat);
+    }
+}
+
+void WaylandApp::on_pointer_handle_button(void *data, struct wl_pointer *pointer,
+        uint32_t serial, uint32_t time, uint32_t button, uint32_t state)
+{
+    struct wl_seat* seat = (wl_seat*) data;
+
+/*
+    if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        xdg_toplevel_move(the_app->m_xdg_toplevel, seat, serial);
+    }
+*/
+}
+
 void WaylandApp::render_frame() {
+    assert(m_surface);
     wl_buffer* buffer = allocate_buffer(m_window_width, m_window_height);
+    if (!buffer) {
+        return;
+    }
     wl_surface_attach(m_surface, buffer, 0, 0);
     wl_surface_commit(m_surface);
 }
