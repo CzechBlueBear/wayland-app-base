@@ -1,6 +1,11 @@
 
 APPNAME=app
 
+OBJS= \
+	app.o \
+	draw.o \
+	main.o
+
 C_COMPILER=clang
 CXX_COMPILER=clang++
 LINKER=clang++
@@ -27,10 +32,10 @@ xdg-shell-client-protocol.h:
 # normal Makefile stuff
 #---
 
-.c.o:
+%.o: %.c
 	${C_COMPILER} -c $*.c -o $*.o
 
-.cpp.o:
+%.o: %.cpp
 	${CXX_COMPILER} -c $*.cpp -o $*.o
 
 clean:
@@ -44,5 +49,5 @@ distclean: clean
 # the app
 #---
 
-app: xdg-shell-client-protocol.h app.o main.o xdg-shell-protocol.o
-	${LINKER} app.o main.o xdg-shell-protocol.o -o ${APPNAME} -lwayland-client -lrt
+app: xdg-shell-client-protocol.h $(OBJS) xdg-shell-protocol.o
+	${LINKER} $(OBJS) xdg-shell-protocol.o -o ${APPNAME} -lwayland-client -lrt
