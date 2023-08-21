@@ -7,6 +7,8 @@
 #include <map>
 #include <string>
 
+#include "draw.hpp"
+
 class WaylandApp {
 protected:
     static WaylandApp* the_app;
@@ -67,13 +69,10 @@ public:
     static void on_pointer_frame(void* data, struct wl_pointer* wl_pointer);
 
     // 2nd level event handlers
-    virtual void draw(uint32_t* pixels, int width, int height);
+    virtual void draw(DrawingContext ctx);
 
 protected:
     void register_global(char const* interface, uint32_t name);
-    void bind_to_compositor(uint32_t name);
-    void bind_to_shm(uint32_t name);
-    void bind_to_xdg_wm_base(uint32_t name);
     wl_buffer* allocate_buffer(uint32_t width, uint32_t height);
     void present_buffer(wl_buffer* buffer);
 

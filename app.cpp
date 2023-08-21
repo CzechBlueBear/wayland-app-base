@@ -284,7 +284,7 @@ wl_buffer* WaylandApp::allocate_buffer(uint32_t width, uint32_t height) {
     wl_shm_pool_destroy(pool);
     close(fd);
 
-    draw(data, width, height);
+    draw(DrawingContext(data, width, height));
 
     munmap(data, size);
 
@@ -412,8 +412,22 @@ void WaylandApp::complain(char const* message) {
     fprintf(stderr, "error: wayland: %s\n", message);
 }
 
-void WaylandApp::draw(uint32_t* pixels, int width, int height) {
+void WaylandApp::draw(DrawingContext ctx) {
 
+    // color transition from green to blue
+    for(int y = 0; y < ctx.height(); ++y) {
+        float height_fraction = (float)y/(float)ctx.height();
+        ctx.xline(0, y, ctx.width(),
+            0xFF000000 |
+            (int)((1.0f - height_fraction)*255.0f) << 8 | 
+            (int)(height_fraction * 255.0f)
+        );
+    }
+
+    // central white rectangle
+    ctx.fill_rect(64, 64, ctx.width()-128, ctx.height()-128, 0xFFFFFFFF);
+
+#if 0
     /* Draw checkerboxed background */
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
@@ -423,4 +437,5 @@ void WaylandApp::draw(uint32_t* pixels, int width, int height) {
                 pixels[y * width + x] = 0xFFEEEEEE;
         }
     }
+#endif
 }

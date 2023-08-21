@@ -3,12 +3,20 @@
 #include <cstdint>
 
 struct DrawingContext {
-    uint32_t* m_pixels; /**< Pointer to the start of the pixel array */
-    int m_width;      /**< Width of the buffer, in pixels */
-    int m_height;     /**< Height of the buffer, in pixels */
-    int m_stride;     /**< Distance, in bytes, between two consecutive lines */
+protected:
+    uint32_t* m_pixels = nullptr;
+    int m_width = 0;
+    int m_height = 0;
 
-    void clear(uint32_t pixel);
+public:
+    DrawingContext(uint32_t* pixels, int width, int height);
+
+    /** Returns the width of the underlying pixel buffer, in pixels. */
+    int width() const { return m_width; }
+
+    /** Returns the height of the underlying pixel buffer, in pixels. */
+    int height() const { return m_height; }
+
     void xline(int x, int y, int width, uint32_t pixel);
     void yline(int x, int y, int height, uint32_t pixel);
     void draw_rect(int x, int y, int width, int height, uint32_t pixel);
