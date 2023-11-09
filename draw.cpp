@@ -41,6 +41,13 @@ void DrawingContext::yline(int x, int y, int height, uint32_t pixel) {
     }
 }
 
+void DrawingContext::draw_rect(int x, int y, int width, int height, uint32_t pixel) {
+    xline(x, y, width, pixel);
+    xline(x, y+height, width, pixel);
+    yline(x, y, height, pixel);
+    yline(x+width, y, height, pixel);
+}
+
 void DrawingContext::fill_rect(int x, int y, int width, int height, uint32_t pixel) {
     for (int i=0; i < height; ++i) {
         xline(x, y+i, width, pixel);

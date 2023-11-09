@@ -3,11 +3,17 @@
 #include <stdio.h>
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
+#include "zxdg-decoration-client-protocol.h"
 #include <array>
 #include <map>
 #include <string>
+#include <linux/input-event-codes.h>
+#include <memory>
+#include <functional>
 
+#include "box.hpp"
 #include "draw.hpp"
+#include "wayland_buffer.hpp"
 
 class WaylandApp {
 protected:
@@ -26,9 +32,14 @@ protected:
     xdg_surface* m_xdg_surface = nullptr;
     xdg_toplevel* m_xdg_toplevel = nullptr;
 
+    static constexpr int BUFFER_COUNT = 4;
+    WaylandBuffer m_buffers[BUFFER_COUNT];
+
     int m_window_width = DEFAULT_WINDOW_WIDTH;
     int m_window_height = DEFAULT_WINDOW_HEIGHT;
     bool m_close_requested = false;
+
+    bool m_redraw_needed = false;
 
 public:
 
@@ -73,11 +84,4 @@ public:
 
 protected:
     void register_global(char const* interface, uint32_t name);
-    wl_buffer* allocate_buffer(uint32_t width, uint32_t height);
-    void present_buffer(wl_buffer* buffer);
-
-    void complain(char const* message);
-
-    static int create_shm_file();
-    static int allocate_shm_file(size_t size);
 };

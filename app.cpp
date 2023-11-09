@@ -1,75 +1,16 @@
 #include "app.hpp"
+#include "shm_util.hpp"
+#include "debug.hpp"
 
 //#define _POSIX_C_SOURCE 200112L
-#include <errno.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <time.h>
-#include <unistd.h>
 #include <cassert>
+#include <cerrno>
 #include <cstring>
 
 // versions of interfaces we want from the server
 const uint32_t COMPOSITOR_API_VERSION = 4;
 const uint32_t SHM_API_VERSION = 1;
 const uint32_t SEAT_API_VERSION = 7;
-
-static void randname(char *buf) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    long r = ts.tv_nsec;
-    for (int i = 0; i < 6; ++i) {
-        buf[i] = 'A'+(r&15)+(r&16)*2;
-        r >>= 5;
-    }
-}
-
-/**
- * Creates a new unsized, shared memory file and returns
- * a file descriptor to it.
- * The file is pre-unlinked and will be deleted as soon as
- * its file descriptor is closed.
- * Returns -1 on error.
- */
-int WaylandApp::create_shm_file() {
-    int retries = 100;
-    do {
-        char name[] = "/wl_shm-XXXXXX";
-        randname(name + sizeof(name) - 7);
-        --retries;
-        int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (fd >= 0) {
-            shm_unlink(name);
-            return fd;
-        }
-    } while (retries > 0 && errno == EEXIST);
-
-    return -1;
-}
-
-/**
- * Allocates a new shared memory file of the given size and returns
- * a file descriptor to it.
- * Returns -1 on error.
- */
-int WaylandApp::allocate_shm_file(size_t size)
-{
-    int fd = create_shm_file();
-    if (fd < 0) {
-        return -1;
-    }
-
-    int ret;
-    do {
-        ret = ftruncate(fd, size);
-    } while (ret < 0 && errno == EINTR);
-
-    if (ret < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
 
 WaylandApp* WaylandApp::the_app = nullptr;
 
@@ -111,10 +52,6 @@ static const struct xdg_wm_base_listener xdg_wm_base_listener_info = {
     .ping = WaylandApp::on_xdg_wm_base_ping,
 };
 
-static const struct wl_buffer_listener wl_buffer_listener_info = {
-    .release = WaylandApp::on_buffer_release,
-};
-
 static const xdg_toplevel_listener xdg_toplevel_listener_info = {
     .configure = WaylandApp::on_xdg_toplevel_configure,
     .close = WaylandApp::on_xdg_toplevel_close,
@@ -143,11 +80,14 @@ static const struct wl_seat_listener wl_seat_listener_info = {
  */
 bool WaylandApp::connect() {
     assert(!m_display);
+
     m_display = wl_display_connect(nullptr);
     if (!m_display) {
         complain("wl_display_connect() failed, is the server running?");
         return false;
     }
+    info("connected to wayland server");
+
     m_registry = wl_display_get_registry(m_display);
     if (!m_registry) {
         complain("wl_display_get_registry() failed");
@@ -181,7 +121,12 @@ bool WaylandApp::connect() {
         goto rollback;
     }
 
-    xdg_surface_add_listener(m_xdg_surface, &xdg_surface_listener_info, nullptr);
+    {
+        int ret = xdg_surface_add_listener(m_xdg_surface, &xdg_surface_listener_info, nullptr);
+        if (ret != 0) {
+            complain("xdg_surface_add_listener(): failed");
+        }
+    }
 
     m_xdg_toplevel = xdg_surface_get_toplevel(m_xdg_surface);
     if (!m_xdg_toplevel) {
@@ -192,9 +137,7 @@ bool WaylandApp::connect() {
     xdg_toplevel_set_title(m_xdg_toplevel, "Example client");
     xdg_toplevel_add_listener(m_xdg_toplevel, &xdg_toplevel_listener_info, nullptr);
 
-    // render the first frame; without this, we won't get a visible window (why?)
-    render_frame();
-
+    m_redraw_needed = true;
     return true;
 
 rollback:
@@ -244,75 +187,43 @@ void WaylandApp::disconnect() {
  * Enters the event loop and proceeds handling events until the window is closed.
  */
 void WaylandApp::enter_event_loop() {
+    int redraws = 0;
+    int revolutions = 0;
+
+    // first render
+    render_frame();
+
+    info("WaylandApp::enter_event_loop(): entered");
     assert(m_display != nullptr);
-    while (wl_display_dispatch(m_display) != -1 && !m_close_requested) {
-        /* This space deliberately left blank */
+    while (wl_display_dispatch_pending(m_display) != -1 && !m_close_requested) {
+        revolutions++;
+        if (m_redraw_needed) {
+            render_frame();
+            m_redraw_needed = false;
+            redraws++;
+        }
+        fprintf(stdout, "wayland app running, %d redraws, %d event revs\r", redraws, revolutions);
+        wl_display_dispatch(m_display);
     }
-}
-
-wl_buffer* WaylandApp::allocate_buffer(uint32_t width, uint32_t height) {
-    int stride = width * 4;     // 4 bytes per pixel
-    int size = stride * height;
-
-    int fd = allocate_shm_file(size);
-    if (fd == -1) {
-        complain("allocate_shm_file() failed");
-        return nullptr;
-    }
-
-    uint32_t *data = (uint32_t*) mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (data == MAP_FAILED) {
-        complain("mmap() failed for pixel buffer");
-        close(fd);
-        return nullptr;
-    }
-
-    assert(m_shm);
-    wl_shm_pool *pool = wl_shm_create_pool(m_shm, fd, size);
-    if (!pool) {
-        complain("wl_shm_create_pool() failed");
-        close(fd);
-        return nullptr;
-    }
-    wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, width, height, stride, WL_SHM_FORMAT_XRGB8888);
-    if (!buffer) {
-        complain("wl_shm_pool_create_buffer() failed");
-        wl_shm_pool_destroy(pool);
-        close(fd);
-        return nullptr;
-    }
-    wl_shm_pool_destroy(pool);
-    close(fd);
-
-    draw(DrawingContext(data, width, height));
-
-    munmap(data, size);
-
-    wl_buffer_add_listener(buffer, &wl_buffer_listener_info, nullptr);
-
-    return buffer;
 }
 
 void WaylandApp::register_global(char const* interface, uint32_t name) {
     if (strcmp(interface, wl_compositor_interface.name) == 0) {
         m_compositor = (wl_compositor*)(wl_registry_bind(m_registry, name, &wl_compositor_interface, COMPOSITOR_API_VERSION));
+        info("interface obtained: wl_compositor");
     }
     else if (strcmp(interface, wl_shm_interface.name) == 0) {
         m_shm = (wl_shm*)(wl_registry_bind(m_registry, name, &wl_shm_interface, SHM_API_VERSION));
+        info("interface obtained: wl_shm");
     }
     else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
         m_xdg_wm_base = (xdg_wm_base*) wl_registry_bind(m_registry, name, &xdg_wm_base_interface, 1);
+        info("interface obtained: xdg_wm_base");
     }
     else if (strcmp(interface, wl_seat_interface.name) == 0) {
         m_seat = (wl_seat*) wl_registry_bind(m_registry, name, &wl_seat_interface, SEAT_API_VERSION);
+        info("interface obtained: wl_seat");
     }
-}
-
-void WaylandApp::present_buffer(wl_buffer* buffer) {
-    assert(m_surface);
-    assert(buffer);
-    wl_surface_attach(m_surface, buffer, 0, 0);
-    wl_surface_commit(m_surface);
 }
 
 void WaylandApp::on_xdg_wm_base_ping(void *data, xdg_wm_base *xdg_wm_base, uint32_t serial)
@@ -331,18 +242,9 @@ void WaylandApp::on_registry_global_remove(void *data, struct wl_registry *regis
     // This space deliberately left blank
 }
 
-void WaylandApp::on_buffer_release(void* data, wl_buffer* buffer) {
-    wl_buffer_destroy(buffer);
-}
-
 void WaylandApp::on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
     xdg_surface_ack_configure(xdg_surface, serial);
-    wl_buffer* buffer = the_app->allocate_buffer(the_app->m_window_width, the_app->m_window_height);
-    if (!buffer) {
-        return;
-    }
-    wl_surface_attach(the_app->m_surface, buffer, 0, 0);
-    wl_surface_commit(the_app->m_surface);
+    the_app->m_redraw_needed = true;
 }
 
 void WaylandApp::on_xdg_toplevel_close(void* data, struct xdg_toplevel *xdg_toplevel) {
@@ -399,17 +301,48 @@ void WaylandApp::on_pointer_frame(void* data, struct wl_pointer* pointer) {
 }
 
 void WaylandApp::render_frame() {
-    assert(m_surface);
-    wl_buffer* buffer = allocate_buffer(m_window_width, m_window_height);
-    if (!buffer) {
+    info("rendering frame");
+
+    int i = 0;
+    for (; i<BUFFER_COUNT; i++) {
+        if (!m_buffers[i].is_valid()) {
+            m_buffers[i].setup(m_shm, m_window_width, m_window_height);
+            break;
+        }
+        else if (!m_buffers[i].is_busy()) {
+            if (
+                (m_buffers[i].get_width() == m_window_width)
+                && (m_buffers[i].get_height() == m_window_height)
+            ) {
+                break;
+            }
+            else {
+                // not of proper size but also not busy, so reconfigure it
+                m_buffers[i].reset();
+                m_buffers[i].setup(m_shm, m_window_width, m_window_height);
+            }
+        }
+        // buffer is still in use, don't touch it
+    }
+    if (i == BUFFER_COUNT) {
+        complain("all buffers are in use, skipping frame");
         return;
     }
-    wl_surface_attach(m_surface, buffer, 0, 0);
-    wl_surface_commit(m_surface);
-}
 
-void WaylandApp::complain(char const* message) {
-    fprintf(stderr, "error: wayland: %s\n", message);
+    auto &buffer = m_buffers[i];
+
+    buffer.map();
+
+    DrawingContext dc = DrawingContext(
+        (uint32_t*)buffer.get_pixels(),
+        buffer.get_width(),
+        buffer.get_height());
+    draw(dc);
+
+    buffer.unmap();
+
+    buffer.present(m_surface);
+    info("frame rendered");
 }
 
 void WaylandApp::draw(DrawingContext ctx) {
@@ -425,7 +358,8 @@ void WaylandApp::draw(DrawingContext ctx) {
     }
 
     // central white rectangle
-    ctx.fill_rect(64, 64, ctx.width()-128, ctx.height()-128, 0xFFFFFFFF);
+    ctx.draw_rect(64, 64, ctx.width()-128, ctx.height()-128, 0xFFFFFFFF);
+    ctx.fill_rect(65, 65, ctx.width()-130, ctx.height()-130, 0xFFDDDDDD);
 
 #if 0
     /* Draw checkerboxed background */
