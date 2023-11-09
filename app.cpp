@@ -1,6 +1,7 @@
 #include "app.hpp"
 #include "shm_util.hpp"
 #include "debug.hpp"
+#include "xdg-shell-client-protocol.h"
 
 //#define _POSIX_C_SOURCE 200112L
 #include <cassert>
@@ -55,14 +56,150 @@ wl::Registry::~Registry() {
     }
 }
 
-void* wl::Registry::bind(uint32_t name, const wl_interface* interface, uint32_t version) {
-    assert(m_registry);
-    return wl_registry_bind(m_registry, name, interface, version);
+wl::Compositor::Compositor(Registry& registry) {
+    m_compositor = registry.bind<wl_compositor>(&wl_compositor_interface, API_VERSION);
+}
+
+wl::Compositor::~Compositor() {
+    if (m_compositor) {
+        wl_compositor_destroy(m_compositor);
+    }
+}
+
+wl::Shm::Shm(Registry& registry) {
+    m_shm = registry.bind<wl_shm>(&wl_shm_interface, API_VERSION);
+}
+
+wl::Shm::~Shm() {
+    if (m_shm) {
+        wl_shm_destroy(m_shm);
+    }
+}
+
+wl::Seat::Seat(Registry& registry) {
+    m_seat = registry.bind<wl_seat>(&wl_seat_interface, API_VERSION);
+    if (!m_seat) {
+        complain("seat interface not available in the registry");
+        return;
+    }
+
+    m_listener.capabilities = [](void* self_, wl_seat* seat, uint32_t caps) {
+        auto self = (wl::Seat*)self_;
+
+        // capabilities can both appear and disappear
+        self->m_pointer_supported = false;
+        self->m_keyboard_supported = false;
+        self->m_touch_supported = false;
+
+        // look what is supported right now
+        if (caps & WL_SEAT_CAPABILITY_POINTER) {
+            self->m_pointer_supported = true;
+        }
+        if (caps & WL_SEAT_CAPABILITY_KEYBOARD) {
+            self->m_keyboard_supported = true;
+        }
+        if (caps & WL_SEAT_CAPABILITY_TOUCH) {
+            self->m_touch_supported = true;
+        }
+    };
+    m_listener.name = [](void* self_, wl_seat* seat, const char* name) {
+        auto self = (wl::Seat*)self_;
+        self->m_name = name;
+    };
+
+    wl_seat_add_listener(m_seat, &m_listener, this);
+}
+
+wl::Seat::~Seat() {
+    if (m_seat) {
+        wl_seat_destroy(m_seat);
+    }
+}
+
+xdg::wm::Base::Base(wl::Registry& registry) {
+    m_base = registry.bind<xdg_wm_base>(&xdg_wm_base_interface, API_VERSION);
+
+    m_listener.ping = [](void* self_, xdg_wm_base* base, uint32_t serial) {
+        auto self = (xdg::wm::Base*)self_;
+        self->pong(serial);
+    };
+
+    xdg_wm_base_add_listener(m_base, &m_listener, this);
+}
+
+xdg::wm::Base::~Base() {
+    if (m_base) {
+        xdg_wm_base_destroy(m_base);
+    }
+}
+
+void xdg::wm::Base::pong(uint32_t serial_number) {
+    xdg_wm_base_pong(m_base, serial_number);
+}
+
+wl::Surface::Surface(wl::Compositor& compositor) {
+    m_surface = wl_compositor_create_surface(compositor.get());
+    if (!m_surface) {
+        complain("wl_compositor_create_surface() failed");
+    }
+}
+
+wl::Surface::~Surface() {
+    if (m_surface) {
+        wl_surface_destroy(m_surface);
+    }
+}
+
+xdg::Surface::Surface(xdg::wm::Base& base, wl::Surface& low_surface) {
+    m_surface = xdg_wm_base_get_xdg_surface(base.get(), low_surface.get());
+    if (!m_surface) {
+        complain("xdg_wm_base_get_xdg_surface() failed");\
+        return;
+    }
+
+    m_listener.configure = [](void* self_, xdg_surface* surface, uint32_t serial) {
+        auto self = (xdg::Surface*)self_;
+        xdg_surface_ack_configure(self->m_surface, serial);
+        // TODO: what are we expected to do here?
+    };
+
+    xdg_surface_add_listener(m_surface, &m_listener, this);
+}
+
+xdg::Surface::~Surface() {
+    if (m_surface) {
+        xdg_surface_destroy(m_surface);
+    }
+}
+
+xdg::Toplevel::Toplevel(xdg::Surface& surface) {
+    m_toplevel = xdg_surface_get_toplevel(surface.get());
+    if (!m_toplevel) {
+        complain("xdg_surface_get_toplevel() failed");
+        return;
+    }
+
+    m_listener.configure = [](void* self_, xdg_toplevel* toplevel, int32_t width, int32_t height, wl_array* states) {
+        auto self = (xdg::Toplevel*) self_;
+        // TODO: we should ack this, but how when we don't know the serial number?
+    };
+    m_listener.close = [](void* self_, xdg_toplevel* toplevel) {
+        auto self = (xdg::Toplevel*) self_;
+        self->m_close_requested = true;
+    };
+
+    xdg_toplevel_add_listener(m_toplevel, &m_listener, this);
+}
+
+xdg::Toplevel::~Toplevel() {
+    xdg_toplevel_destroy(m_toplevel);
+}
+
+void xdg::Toplevel::set_title(std::string title) {
+    xdg_toplevel_set_title(m_toplevel, title.c_str());
 }
 
 // versions of interfaces we want from the server
-const uint32_t COMPOSITOR_API_VERSION = 4;
-const uint32_t SHM_API_VERSION = 1;
 const uint32_t SEAT_API_VERSION = 7;
 
 WaylandApp* WaylandApp::the_app = nullptr;
@@ -75,37 +212,13 @@ WaylandApp &WaylandApp::the() {
     return *the_app;
 }
 
-/**
- * Initializes the object but does not yet connect to Wayland server.
- * After creating, use connect() to establish a connection.
- */
-WaylandApp::WaylandApp() {
-    the_app = this;
-}
-
 WaylandApp::~WaylandApp() {
-    disconnect();
     the_app = nullptr;
 }
 
 // coherent naming of listeners (to preserve our sanity):
 // if structure is A_B_C_listener, then instance is A_B_C_listener_info,
 // and callbacks are called WaylandApp::on_A_B_C_something().
-
-static const struct xdg_surface_listener xdg_surface_listener_info = {
-    .configure = WaylandApp::on_xdg_surface_configure,
-};
-
-xdg_wm_base_listener WaylandApp::xdg_wm_base_listener_info = {
-    .ping = [](void* self, xdg_wm_base* base, uint32_t serial) {
-        xdg_wm_base_pong(WaylandApp::the().m_xdg_wm_base.get(), serial);
-    }
-};
-
-static const xdg_toplevel_listener xdg_toplevel_listener_info = {
-    .configure = WaylandApp::on_xdg_toplevel_configure,
-    .close = WaylandApp::on_xdg_toplevel_close,
-};
 
 static const struct wl_pointer_listener pointer_listener = {
     .enter = WaylandApp::on_pointer_enter,
@@ -116,29 +229,18 @@ static const struct wl_pointer_listener pointer_listener = {
     //.axis = noop, // TODO
 };
 
-static const struct wl_seat_listener wl_seat_listener_info = {
-    .capabilities = WaylandApp::on_seat_handle_capabilities,
-    .name = WaylandApp::on_seat_name,
-};
-
-/**
- * Connects to the default Wayland server and creates all needed structures.
- * Returns true on success, false on failure.
- * Error messages are printed on stderr. No messages are produced if successful.
- * On failure, a best attempt is done to return to clean unconnected state
- * to allow another attempt.
- */
-bool WaylandApp::connect() {
-    assert(!m_display);
+WaylandApp::WaylandApp() {
+    assert(!the_app);
+    the_app = this;
 
     m_display = std::make_unique<wl::Display>();
     if (!m_display->is_good()) {
-        return false;
+        return;
     }
 
     m_registry = std::make_unique<wl::Registry>(*m_display);
     if (!m_registry->is_good()) {
-        return false;
+        return;
     }
 
     // during this roundtrip, the server should send us IDs of many globals,
@@ -146,93 +248,32 @@ bool WaylandApp::connect() {
     // for each global, the on_registry_global() callback is called automatically
     m_display->roundtrip();
 
-    m_compositor.reset(m_registry->bind<wl_compositor>(&wl_compositor_interface, COMPOSITOR_API_VERSION));
-    m_shm.reset(m_registry->bind<wl_shm>(&wl_shm_interface, SHM_API_VERSION));
-    m_xdg_wm_base.reset(m_registry->bind<xdg_wm_base>(&xdg_wm_base_interface, 1));
-    m_seat.reset(m_registry->bind<wl_seat>(&wl_seat_interface, SEAT_API_VERSION));
+    m_compositor = std::make_unique<wl::Compositor>(*m_registry);
+    m_shm = std::make_unique<wl::Shm>(*m_registry);
+    m_base = std::make_unique<xdg::wm::Base>(*m_registry);
+    m_seat = std::make_unique<wl::Seat>(*m_registry);
 
-    if (!m_compositor || !m_shm || !m_xdg_wm_base || !m_seat) {
-        complain("missing one of interfaces: wl_compositor, wl_shm, wl_xdg_wm_base, wl_seat");
-        goto rollback;
-    }
+    m_surface = std::make_unique<wl::Surface>(*m_compositor);
+    m_xdg_surface = std::make_unique<xdg::Surface>(*m_base, *m_surface);
+    m_toplevel = std::make_unique<xdg::Toplevel>(*m_xdg_surface);
 
-    wl_seat_add_listener(m_seat.get(), &wl_seat_listener_info, nullptr);
-    xdg_wm_base_add_listener(m_xdg_wm_base.get(), &xdg_wm_base_listener_info, nullptr);
-
-    m_surface.reset(wl_compositor_create_surface(m_compositor.get()));
-    if (!m_surface) {
-        complain("wl_compositor_create_surface() failed");
-        goto rollback;
-    }
-
-    m_xdg_surface.reset(xdg_wm_base_get_xdg_surface(m_xdg_wm_base.get(), m_surface.get()));
-    if (!m_xdg_surface) {
-        complain("xdg_wm_base_get_xdg_surface() failed");
-        goto rollback;
-    }
-
-    {
-        int ret = xdg_surface_add_listener(m_xdg_surface.get(), &xdg_surface_listener_info, nullptr);
-        if (ret != 0) {
-            complain("xdg_surface_add_listener(): failed");
-        }
-    }
-
-    m_xdg_toplevel.reset(xdg_surface_get_toplevel(m_xdg_surface.get()));
-    if (!m_xdg_toplevel) {
-        complain("xdg_surface_get_toplevel() failed");
-        goto rollback;
-    }
-
-    xdg_toplevel_set_title(m_xdg_toplevel.get(), "Example client");
-    xdg_toplevel_add_listener(m_xdg_toplevel.get(), &xdg_toplevel_listener_info, nullptr);
-
-    m_redraw_needed = true;
-    return true;
-
-rollback:
-    m_xdg_surface.reset();
-    m_surface.reset();
-    m_display.reset();
-    return false;
-}
-
-/**
- * Disconnects from the Wayland server.
- * Attempts to cleanup and return to initial state so that a new connection
- * is possible if needed - even if the previous connection was only half finished.
- * Calling with no connection is safe and has no effect.
- */
-void WaylandApp::disconnect() {
-
-    // destroy objects we created (interfaces don't need destruction)
-    m_xdg_toplevel.reset();
-    m_xdg_surface.reset();
-    m_xdg_wm_base.reset();
-    m_surface.reset();
-    m_shm.reset();
-    m_seat.reset();
-    m_compositor.reset();
-    m_registry.reset();
-    m_display.reset();
-
-    // reset the rest
-    m_window_width = DEFAULT_WINDOW_WIDTH;
-    m_window_height = DEFAULT_WINDOW_HEIGHT;
+    m_toplevel->set_title("Example client");
 }
 
 /**
  * Enters the event loop and proceeds handling events until the window is closed.
  */
 void WaylandApp::enter_event_loop() {
+    info("event loop entered");
+
+    assert(m_display);
+
     int redraws = 0;
     int revolutions = 0;
 
     // first render
     render_frame();
 
-    info("WaylandApp::enter_event_loop(): entered");
-    assert(m_display != nullptr);
     while (m_display->dispatch() != -1) {
         revolutions++;
         if (m_redraw_needed) {
@@ -242,19 +283,10 @@ void WaylandApp::enter_event_loop() {
         }
         fprintf(stdout, "wayland app running, %d redraws, %d event revs\r", redraws, revolutions);
 
-        if (m_close_requested) {
+        if (m_toplevel->is_close_requested()) {
             break;
         }
     }
-}
-
-void WaylandApp::on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
-    xdg_surface_ack_configure(xdg_surface, serial);
-    the_app->m_redraw_needed = true;
-}
-
-void WaylandApp::on_xdg_toplevel_close(void* data, struct xdg_toplevel *xdg_toplevel) {
-    the_app->m_close_requested = true;
 }
 
 void WaylandApp::on_xdg_toplevel_configure(void* data, struct xdg_toplevel* xdg_toplevel,
@@ -263,14 +295,6 @@ void WaylandApp::on_xdg_toplevel_configure(void* data, struct xdg_toplevel* xdg_
     if (width != 0) { the_app->m_window_width = width; }
     if (height != 0) { the_app->m_window_height = height; }
     //xdg_surface_ack_configure(the_app->m_xdg_surface, serial);
-}
-
-void WaylandApp::on_seat_handle_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities)
-{
-    if (capabilities & WL_SEAT_CAPABILITY_POINTER) {
-        struct wl_pointer *pointer = wl_seat_get_pointer(seat);
-        wl_pointer_add_listener(pointer, &pointer_listener, seat);
-    }
 }
 
 void WaylandApp::on_pointer_button(void *data, struct wl_pointer *pointer,
@@ -285,34 +309,13 @@ void WaylandApp::on_pointer_button(void *data, struct wl_pointer *pointer,
 */
 }
 
-void WaylandApp::on_seat_name(void* data, struct wl_seat* seat, char const* name) {
-    /* pass */
-}
-
-void WaylandApp::on_pointer_enter(void* data, struct wl_pointer* pointer, uint32_t, wl_surface*, wl_fixed_t x, wl_fixed_t y) {
-    /* pass */
-}
-
-void WaylandApp::on_pointer_leave(void* data, struct wl_pointer* pointer, uint32_t, wl_surface*) {
-    /* pass */
-}
-
-void WaylandApp::on_pointer_motion(void *data, struct wl_pointer *wl_pointer,
-               uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y) {
-    /* pass */
-}
-
-void WaylandApp::on_pointer_frame(void* data, struct wl_pointer* pointer) {
-    /* pass */
-}
-
 void WaylandApp::render_frame() {
     info("rendering frame");
 
     int i = 0;
     for (; i<BUFFER_COUNT; i++) {
         if (!m_buffers[i].is_valid()) {
-            m_buffers[i].setup(m_shm.get(), m_window_width, m_window_height);
+            m_buffers[i].setup(m_shm.get()->get(), m_window_width, m_window_height);
             break;
         }
         else if (!m_buffers[i].is_busy()) {
@@ -325,7 +328,7 @@ void WaylandApp::render_frame() {
             else {
                 // not of proper size but also not busy, so reconfigure it
                 m_buffers[i].reset();
-                m_buffers[i].setup(m_shm.get(), m_window_width, m_window_height);
+                m_buffers[i].setup(m_shm.get()->get(), m_window_width, m_window_height);
             }
         }
         // buffer is still in use, don't touch it
@@ -347,7 +350,7 @@ void WaylandApp::render_frame() {
 
     buffer.unmap();
 
-    buffer.present(m_surface.get());
+    buffer.present(m_surface.get()->get());
     info("frame rendered");
 }
 

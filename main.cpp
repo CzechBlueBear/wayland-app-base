@@ -2,13 +2,11 @@
 
 int main(int argc, char** argv) {
     WaylandApp app;
-
-    if (!app.connect()) {
+    if (!app.is_good()) {
         return 1;
     }
 
     app.enter_event_loop();
 
-    app.disconnect();
     return 0;
 }

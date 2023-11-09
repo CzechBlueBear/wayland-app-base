@@ -24,7 +24,7 @@ public:
     Display();
     ~Display();
     wl_display* get() { return m_display; }
-    bool is_good() { return !!m_display; }
+    bool is_good() const { return !!m_display; }
     void roundtrip();
     int dispatch();
 };
@@ -38,9 +38,7 @@ public:
     Registry(Display& dpy);
     ~Registry();
     wl_registry* get() { return m_registry; }
-    bool is_good() { return !!m_registry; }
-    uint32_t get_interface_name(std::string interface) { return m_interfaces[interface]; }
-    void* bind(uint32_t name, const wl_interface* interface, uint32_t version);
+    bool is_good() const { return !!m_registry; }
 
     template<class T>
     T* bind(const wl_interface* interface, uint32_t version) {
@@ -50,34 +48,123 @@ public:
     }
 };
 
+class Compositor {
+protected:
+    wl_compositor* m_compositor = nullptr;
+public:
+    const uint32_t API_VERSION = 4;
+    Compositor(Registry& registry);
+    ~Compositor();
+    wl_compositor* get() { return m_compositor; }
+    bool is_good() const { return !!m_compositor; }
+};
+
+class Shm {
+protected:
+    wl_shm* m_shm = nullptr;
+public:
+    const uint32_t API_VERSION = 1;
+    Shm(Registry& registry);
+    ~Shm();
+    wl_shm* get() { return m_shm; }
+    bool is_good() const { return !!m_shm; }
+};
+
+class Seat {
+protected:
+    wl_seat* m_seat = nullptr;
+    struct wl_seat_listener m_listener = { 0 };
+    std::string m_name = "";
+    bool m_pointer_supported = false;
+    bool m_keyboard_supported = false;
+    bool m_touch_supported = false;
+public:
+    const uint32_t API_VERSION = 7;
+    Seat(Registry& registry);
+    ~Seat();
+    wl_seat* get() { return m_seat; }
+    bool is_good() const { return !!m_seat; }
+    std::string get_name() const { return m_name; }
+    bool is_pointer_supported() const { return m_pointer_supported; }
+    bool is_keyboard_supported() const { return m_keyboard_supported; }
+    bool is_touch_supported() const { return m_touch_supported; }
+};
+
+class Surface {
+protected:
+    wl_surface* m_surface = nullptr;
+public:
+    Surface(wl::Compositor& compositor);
+    ~Surface();
+    wl_surface* get() { return m_surface; }
+    bool is_good() const { return !!m_surface; }
+};
+
 } // namespace wl
+
+namespace xdg {
+    namespace wm {
+
+        /// Base interface of the window manager.
+        class Base {
+        protected:
+            xdg_wm_base* m_base = nullptr;
+            struct xdg_wm_base_listener m_listener = { 0 };
+        public:
+            const uint32_t API_VERSION = 1;
+            Base(wl::Registry& registry);
+            ~Base();
+            xdg_wm_base* get() { return m_base; }
+            bool is_good() const { return !!m_base; }
+            void pong(uint32_t message_id);
+        };
+
+    } // namespace xdg::wm
+
+    class Surface {
+    protected:
+        xdg_surface* m_surface = nullptr;
+        struct xdg_surface_listener m_listener = { 0 };
+    public:
+        Surface(xdg::wm::Base& base, wl::Surface& low_surface);
+        ~Surface();
+        xdg_surface* get() { return m_surface; }
+        bool is_good() const { return !!m_surface; }
+    };
+
+    class Toplevel {
+    protected:
+        xdg_toplevel* m_toplevel = nullptr;
+        struct xdg_toplevel_listener m_listener = { 0 };
+        bool m_close_requested = false;
+    public:
+        Toplevel(xdg::Surface& surface);
+        ~Toplevel();
+        xdg_toplevel* get() { return m_toplevel; }
+        bool is_good() const { return !!m_toplevel; }
+        bool is_close_requested() const { return m_close_requested; }
+        void clear_close_request() { m_close_requested = false; }
+        void set_title(std::string title);
+    };
+
+} // namespace xdg
 
 class WaylandApp {
 protected:
     static WaylandApp* the_app;
 
-    // Wayland globals
-    std::unique_ptr<wl::Display> m_display;
-    std::unique_ptr<wl::Registry> m_registry;
-    struct wl_compositor_deleter { void operator()(wl_compositor* c) { wl_compositor_destroy(c); }};
-    std::unique_ptr<wl_compositor, wl_compositor_deleter> m_compositor;
-    struct wl_shm_deleter { void operator()(wl_shm* shm) { wl_shm_destroy(shm); }};
-    std::unique_ptr<wl_shm, wl_shm_deleter> m_shm;
-    struct xdg_wm_base_deleter { void operator()(xdg_wm_base* base) { xdg_wm_base_destroy(base); }};
-    std::unique_ptr<xdg_wm_base, xdg_wm_base_deleter> m_xdg_wm_base;
-    struct wl_seat_deleter { void operator()(wl_seat* s) { wl_seat_destroy(s); }};
-    std::unique_ptr<wl_seat, wl_seat_deleter> m_seat;
+    // Wayland globals (existing on the server, we only bind to them)
+    std::unique_ptr<wl::Display>    m_display;
+    std::unique_ptr<wl::Registry>   m_registry;
+    std::unique_ptr<wl::Compositor> m_compositor;
+    std::unique_ptr<wl::Shm>        m_shm;
+    std::unique_ptr<xdg::wm::Base>  m_base;
+    std::unique_ptr<wl::Seat>       m_seat;
 
-    // Wayland objects
-    struct wl_surface_deleter { void operator()(wl_surface* s) { wl_surface_destroy(s); }};
-    std::unique_ptr<wl_surface, wl_surface_deleter> m_surface;
-    struct xdg_surface_deleter { void operator()(xdg_surface* s) { xdg_surface_destroy(s); }};
-    std::unique_ptr<xdg_surface, xdg_surface_deleter> m_xdg_surface;
-    struct xdg_toplevel_deleter { void operator()(xdg_toplevel* tl) { xdg_toplevel_destroy(tl); }};
-    std::unique_ptr<xdg_toplevel, xdg_toplevel_deleter> m_xdg_toplevel;
-
-    static wl_registry_listener wl_registry_listener_info;
-    static xdg_wm_base_listener xdg_wm_base_listener_info;
+    // Wayland objects (owned by us)
+    std::unique_ptr<wl::Surface>    m_surface;
+    std::unique_ptr<xdg::Surface>   m_xdg_surface;
+    std::unique_ptr<xdg::Toplevel>  m_toplevel;
 
     static constexpr int BUFFER_COUNT = 4;
     WaylandBuffer m_buffers[BUFFER_COUNT];
@@ -95,11 +182,10 @@ public:
 
     WaylandApp();
     virtual ~WaylandApp();
+    bool is_good() const { return !!m_toplevel; }
 
     static WaylandApp &the();
 
-    bool connect();
-    void disconnect();
     void enter_event_loop();
     void render_frame();
     bool is_close_requested() const { return m_close_requested; }
