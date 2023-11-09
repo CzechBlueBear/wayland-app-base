@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <wayland-client.h>
+#include "debug.hpp"
 #include "xdg-shell-client-protocol.h"
 #include "zxdg-decoration-client-protocol.h"
 #include <array>
@@ -40,11 +41,26 @@ public:
     wl_registry* get() { return m_registry; }
     bool is_good() const { return !!m_registry; }
 
+    /// Checks whether an interface of that name is supported.
+    template<class T>
+    bool has_interface(std::string interface_name) {
+        auto cursor = m_interfaces.find(interface_name);
+        return (cursor != m_interfaces.end());
+    }
+
+    /// Requests the given interface with specified version.
     template<class T>
     T* bind(const wl_interface* interface, uint32_t version) {
         auto cursor = m_interfaces.find(interface->name);
         if (cursor == m_interfaces.end()) { return nullptr; }
-        return (T*)(wl_registry_bind(m_registry, cursor->second, interface, version));
+        auto result = (T*)(wl_registry_bind(m_registry, cursor->second, interface, version));
+        if (result) {
+            info(std::string("bound to interface: ") + interface->name);
+        }
+        else {
+            info(std::string("could not bind to interface: ") + interface->name);
+        }
+        return result;
     }
 };
 
@@ -98,6 +114,7 @@ public:
     ~Surface();
     wl_surface* get() { return m_surface; }
     bool is_good() const { return !!m_surface; }
+    void commit();
 };
 
 } // namespace wl
@@ -125,18 +142,26 @@ namespace xdg {
     protected:
         xdg_surface* m_surface = nullptr;
         struct xdg_surface_listener m_listener = { 0 };
+        uint32_t m_last_configure_event_serial = 0;
+        bool m_configure_event_pending = false;
     public:
         Surface(xdg::wm::Base& base, wl::Surface& low_surface);
         ~Surface();
         xdg_surface* get() { return m_surface; }
         bool is_good() const { return !!m_surface; }
+        bool is_configure_event_pending() const { return m_configure_event_pending; }
+        void ack_configure();
     };
 
+    // The Wayland equivalent of a window encapsulating a surface.
     class Toplevel {
     protected:
         xdg_toplevel* m_toplevel = nullptr;
         struct xdg_toplevel_listener m_listener = { 0 };
         bool m_close_requested = false;
+        bool m_configure_requested = false;
+        int m_last_requested_width = 0;
+        int m_last_requested_height = 0;
     public:
         Toplevel(xdg::Surface& surface);
         ~Toplevel();
@@ -144,7 +169,33 @@ namespace xdg {
         bool is_good() const { return !!m_toplevel; }
         bool is_close_requested() const { return m_close_requested; }
         void clear_close_request() { m_close_requested = false; }
+        bool is_configure_requested() const { return m_configure_requested; }
+        void clear_configure_request() { m_configure_requested = false; }
         void set_title(std::string title);
+        int get_last_requested_width() const { return m_last_requested_width; }
+        int get_last_requested_height() const { return m_last_requested_height; }
+    };
+
+    class DecorationManager {
+    protected:
+        zxdg_decoration_manager_v1* m_manager = nullptr;
+        const int API_VERSION = 1;
+    public:
+        DecorationManager(wl::Registry& registry);
+        ~DecorationManager();
+        zxdg_decoration_manager_v1* get() { return m_manager; }
+        bool is_good() const { return !!m_manager; }
+    };
+
+    class ToplevelDecoration {
+    protected:
+        zxdg_toplevel_decoration_v1* m_decoration = nullptr;
+    public:
+        ToplevelDecoration(xdg::DecorationManager& manager, xdg::Toplevel& toplevel);
+        ~ToplevelDecoration();
+        zxdg_toplevel_decoration_v1* get() { return m_decoration; }
+        bool is_good() const { return !!m_decoration; }
+        void set_server_side_mode();
     };
 
 } // namespace xdg
@@ -165,6 +216,8 @@ protected:
     std::unique_ptr<wl::Surface>    m_surface;
     std::unique_ptr<xdg::Surface>   m_xdg_surface;
     std::unique_ptr<xdg::Toplevel>  m_toplevel;
+    std::unique_ptr<xdg::DecorationManager> m_decoration_manager;
+    std::unique_ptr<xdg::ToplevelDecoration> m_decoration;
 
     static constexpr int BUFFER_COUNT = 4;
     WaylandBuffer m_buffers[BUFFER_COUNT];

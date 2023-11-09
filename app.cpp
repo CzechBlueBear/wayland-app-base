@@ -79,7 +79,6 @@ wl::Shm::~Shm() {
 wl::Seat::Seat(Registry& registry) {
     m_seat = registry.bind<wl_seat>(&wl_seat_interface, API_VERSION);
     if (!m_seat) {
-        complain("seat interface not available in the registry");
         return;
     }
 
@@ -150,6 +149,11 @@ wl::Surface::~Surface() {
     }
 }
 
+void wl::Surface::commit() {
+    assert(m_surface);
+    wl_surface_commit(m_surface);
+}
+
 xdg::Surface::Surface(xdg::wm::Base& base, wl::Surface& low_surface) {
     m_surface = xdg_wm_base_get_xdg_surface(base.get(), low_surface.get());
     if (!m_surface) {
@@ -159,8 +163,8 @@ xdg::Surface::Surface(xdg::wm::Base& base, wl::Surface& low_surface) {
 
     m_listener.configure = [](void* self_, xdg_surface* surface, uint32_t serial) {
         auto self = (xdg::Surface*)self_;
-        xdg_surface_ack_configure(self->m_surface, serial);
-        // TODO: what are we expected to do here?
+        self->m_last_configure_event_serial = serial;
+        self->m_configure_event_pending = true;
     };
 
     xdg_surface_add_listener(m_surface, &m_listener, this);
@@ -172,6 +176,15 @@ xdg::Surface::~Surface() {
     }
 }
 
+void xdg::Surface::ack_configure() {
+    if (!m_configure_event_pending) {
+        complain("no configure event is pending");
+        return;
+    }
+    xdg_surface_ack_configure(m_surface, m_last_configure_event_serial);
+    m_configure_event_pending = false;
+}
+
 xdg::Toplevel::Toplevel(xdg::Surface& surface) {
     m_toplevel = xdg_surface_get_toplevel(surface.get());
     if (!m_toplevel) {
@@ -181,6 +194,9 @@ xdg::Toplevel::Toplevel(xdg::Surface& surface) {
 
     m_listener.configure = [](void* self_, xdg_toplevel* toplevel, int32_t width, int32_t height, wl_array* states) {
         auto self = (xdg::Toplevel*) self_;
+        self->m_last_requested_width = width;
+        self->m_last_requested_height = height;
+        self->m_configure_requested = true;
         // TODO: we should ack this, but how when we don't know the serial number?
     };
     m_listener.close = [](void* self_, xdg_toplevel* toplevel) {
@@ -199,8 +215,28 @@ void xdg::Toplevel::set_title(std::string title) {
     xdg_toplevel_set_title(m_toplevel, title.c_str());
 }
 
-// versions of interfaces we want from the server
-const uint32_t SEAT_API_VERSION = 7;
+xdg::DecorationManager::DecorationManager(wl::Registry& registry) {
+    m_manager = registry.bind<zxdg_decoration_manager_v1>(&zxdg_decoration_manager_v1_interface, API_VERSION);
+}
+
+xdg::DecorationManager::~DecorationManager() {
+    zxdg_decoration_manager_v1_destroy(m_manager);
+}
+
+xdg::ToplevelDecoration::ToplevelDecoration(xdg::DecorationManager& manager, xdg::Toplevel& toplevel) {
+    m_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(manager.get(), toplevel.get());
+}
+
+xdg::ToplevelDecoration::~ToplevelDecoration() {
+    if (m_decoration) {
+        zxdg_toplevel_decoration_v1_destroy(m_decoration);
+    }
+}
+
+void xdg::ToplevelDecoration::set_server_side_mode() {
+    assert(m_decoration);
+    zxdg_toplevel_decoration_v1_set_mode(m_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+}
 
 WaylandApp* WaylandApp::the_app = nullptr;
 
@@ -255,9 +291,24 @@ WaylandApp::WaylandApp() {
 
     m_surface = std::make_unique<wl::Surface>(*m_compositor);
     m_xdg_surface = std::make_unique<xdg::Surface>(*m_base, *m_surface);
+    m_surface->commit();
+
     m_toplevel = std::make_unique<xdg::Toplevel>(*m_xdg_surface);
+    m_surface->commit();
 
     m_toplevel->set_title("Example client");
+
+    m_decoration_manager = std::make_unique<xdg::DecorationManager>(*m_registry);
+    if (m_decoration_manager->is_good()) {
+        m_decoration = std::make_unique<xdg::ToplevelDecoration>(*m_decoration_manager, *m_toplevel);
+        if (m_decoration->is_good()) {
+            m_decoration->set_server_side_mode();
+        }
+    }
+
+    if (m_xdg_surface->is_configure_event_pending()) {
+        m_xdg_surface->ack_configure();
+    }
 }
 
 /**
@@ -274,11 +325,18 @@ void WaylandApp::enter_event_loop() {
     // first render
     render_frame();
 
+    bool need_redraw = true;
     while (m_display->dispatch() != -1) {
         revolutions++;
-        if (m_redraw_needed) {
+
+        if (m_xdg_surface->is_configure_event_pending()) {
+            m_xdg_surface->ack_configure();
+            need_redraw = true;
+        }
+
+        if (need_redraw) {
             render_frame();
-            m_redraw_needed = false;
+            need_redraw = false;
             redraws++;
         }
         fprintf(stdout, "wayland app running, %d redraws, %d event revs\r", redraws, revolutions);
@@ -287,14 +345,6 @@ void WaylandApp::enter_event_loop() {
             break;
         }
     }
-}
-
-void WaylandApp::on_xdg_toplevel_configure(void* data, struct xdg_toplevel* xdg_toplevel,
-    int32_t width, int32_t height, struct wl_array *states)
-{
-    if (width != 0) { the_app->m_window_width = width; }
-    if (height != 0) { the_app->m_window_height = height; }
-    //xdg_surface_ack_configure(the_app->m_xdg_surface, serial);
 }
 
 void WaylandApp::on_pointer_button(void *data, struct wl_pointer *pointer,
