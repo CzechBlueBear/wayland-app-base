@@ -1,13 +1,16 @@
 #pragma once
+#include "shm_util.hpp"
+
 #include <wayland-client.h>
 #include <cassert>
-#include "shm_util.hpp"
+#include <memory>
 
 class WaylandBuffer {
 private:
     bool m_valid = false;
     bool m_busy = false;
-    wl_buffer* m_buffer = nullptr;
+    struct wl_buffer_deleter { void operator()(wl_buffer* buf) { wl_buffer_destroy(buf); }};
+    std::unique_ptr<wl_buffer, wl_buffer_deleter> m_buffer;
     int m_width = 0;
     int m_height = 0;
     AnonSharedMemory m_memory;

@@ -7,6 +7,59 @@
 #include <cerrno>
 #include <cstring>
 
+wl::Display::Display() {
+    m_display = wl_display_connect(nullptr);
+    if (!m_display) {
+        complain("could not connect to Wayland display");
+    }
+}
+
+wl::Display::~Display() {
+    if (m_display) {
+        wl_display_disconnect(m_display);
+    }
+}
+
+void wl::Display::roundtrip() {
+    assert(m_display);
+    wl_display_roundtrip(m_display);
+}
+
+int wl::Display::dispatch() {
+    return wl_display_dispatch(m_display);
+}
+
+wl::Registry::Registry(wl::Display& dpy) {
+    m_display = dpy.get();
+
+    m_registry = wl_display_get_registry(m_display);
+    if (!m_registry) {
+        complain("could not create Wayland registry");
+    }
+
+    static const wl_registry_listener listener {
+        .global = [](void* self_, wl_registry* registry, uint32_t name, const char* iface, uint32_t version) {
+            auto self = (wl::Registry*)self_;
+            self->m_interfaces[iface] = name;
+        },
+        .global_remove = [](void* self_, wl_registry* registry, uint32_t name) {
+            // todo
+        }
+    };
+    wl_registry_add_listener(m_registry, &listener, this);
+}
+
+wl::Registry::~Registry() {
+    if (m_registry) {
+        wl_registry_destroy(m_registry);
+    }
+}
+
+void* wl::Registry::bind(uint32_t name, const wl_interface* interface, uint32_t version) {
+    assert(m_registry);
+    return wl_registry_bind(m_registry, name, interface, version);
+}
+
 // versions of interfaces we want from the server
 const uint32_t COMPOSITOR_API_VERSION = 4;
 const uint32_t SHM_API_VERSION = 1;
@@ -39,17 +92,14 @@ WaylandApp::~WaylandApp() {
 // if structure is A_B_C_listener, then instance is A_B_C_listener_info,
 // and callbacks are called WaylandApp::on_A_B_C_something().
 
-static const struct wl_registry_listener wl_registry_listener_info = {
-    .global = WaylandApp::on_registry_global,
-    .global_remove = WaylandApp::on_registry_global_remove,
-};
-
 static const struct xdg_surface_listener xdg_surface_listener_info = {
     .configure = WaylandApp::on_xdg_surface_configure,
 };
 
-static const struct xdg_wm_base_listener xdg_wm_base_listener_info = {
-    .ping = WaylandApp::on_xdg_wm_base_ping,
+xdg_wm_base_listener WaylandApp::xdg_wm_base_listener_info = {
+    .ping = [](void* self, xdg_wm_base* base, uint32_t serial) {
+        xdg_wm_base_pong(WaylandApp::the().m_xdg_wm_base.get(), serial);
+    }
 };
 
 static const xdg_toplevel_listener xdg_toplevel_listener_info = {
@@ -81,69 +131,69 @@ static const struct wl_seat_listener wl_seat_listener_info = {
 bool WaylandApp::connect() {
     assert(!m_display);
 
-    m_display = wl_display_connect(nullptr);
-    if (!m_display) {
-        complain("wl_display_connect() failed, is the server running?");
+    m_display = std::make_unique<wl::Display>();
+    if (!m_display->is_good()) {
         return false;
     }
-    info("connected to wayland server");
 
-    m_registry = wl_display_get_registry(m_display);
-    if (!m_registry) {
-        complain("wl_display_get_registry() failed");
-        goto rollback;
+    m_registry = std::make_unique<wl::Registry>(*m_display);
+    if (!m_registry->is_good()) {
+        return false;
     }
-
-    wl_registry_add_listener(m_registry, &wl_registry_listener_info, nullptr);
 
     // during this roundtrip, the server should send us IDs of many globals,
     // including the compositor, SHM and XDG windowmanager base, and seat;
     // for each global, the on_registry_global() callback is called automatically
-    wl_display_roundtrip(m_display);
+    m_display->roundtrip();
+
+    m_compositor.reset(m_registry->bind<wl_compositor>(&wl_compositor_interface, COMPOSITOR_API_VERSION));
+    m_shm.reset(m_registry->bind<wl_shm>(&wl_shm_interface, SHM_API_VERSION));
+    m_xdg_wm_base.reset(m_registry->bind<xdg_wm_base>(&xdg_wm_base_interface, 1));
+    m_seat.reset(m_registry->bind<wl_seat>(&wl_seat_interface, SEAT_API_VERSION));
 
     if (!m_compositor || !m_shm || !m_xdg_wm_base || !m_seat) {
         complain("missing one of interfaces: wl_compositor, wl_shm, wl_xdg_wm_base, wl_seat");
         goto rollback;
     }
 
-    wl_seat_add_listener(m_seat, &wl_seat_listener_info, nullptr);
-    xdg_wm_base_add_listener(m_xdg_wm_base, &xdg_wm_base_listener_info, nullptr);
+    wl_seat_add_listener(m_seat.get(), &wl_seat_listener_info, nullptr);
+    xdg_wm_base_add_listener(m_xdg_wm_base.get(), &xdg_wm_base_listener_info, nullptr);
 
-    m_surface = wl_compositor_create_surface(m_compositor);
+    m_surface.reset(wl_compositor_create_surface(m_compositor.get()));
     if (!m_surface) {
         complain("wl_compositor_create_surface() failed");
         goto rollback;
     }
 
-    m_xdg_surface = xdg_wm_base_get_xdg_surface(m_xdg_wm_base, m_surface);
+    m_xdg_surface.reset(xdg_wm_base_get_xdg_surface(m_xdg_wm_base.get(), m_surface.get()));
     if (!m_xdg_surface) {
         complain("xdg_wm_base_get_xdg_surface() failed");
         goto rollback;
     }
 
     {
-        int ret = xdg_surface_add_listener(m_xdg_surface, &xdg_surface_listener_info, nullptr);
+        int ret = xdg_surface_add_listener(m_xdg_surface.get(), &xdg_surface_listener_info, nullptr);
         if (ret != 0) {
             complain("xdg_surface_add_listener(): failed");
         }
     }
 
-    m_xdg_toplevel = xdg_surface_get_toplevel(m_xdg_surface);
+    m_xdg_toplevel.reset(xdg_surface_get_toplevel(m_xdg_surface.get()));
     if (!m_xdg_toplevel) {
         complain("xdg_surface_get_toplevel() failed");
         goto rollback;
     }
 
-    xdg_toplevel_set_title(m_xdg_toplevel, "Example client");
-    xdg_toplevel_add_listener(m_xdg_toplevel, &xdg_toplevel_listener_info, nullptr);
+    xdg_toplevel_set_title(m_xdg_toplevel.get(), "Example client");
+    xdg_toplevel_add_listener(m_xdg_toplevel.get(), &xdg_toplevel_listener_info, nullptr);
 
     m_redraw_needed = true;
     return true;
 
 rollback:
-    if (m_xdg_surface) { xdg_surface_destroy(m_xdg_surface); m_xdg_surface = nullptr; }
-    if (m_surface) { wl_surface_destroy(m_surface); m_surface = nullptr; }
-    if (m_display) { wl_display_disconnect(m_display); m_display = nullptr; }
+    m_xdg_surface.reset();
+    m_surface.reset();
+    m_display.reset();
     return false;
 }
 
@@ -156,27 +206,15 @@ rollback:
 void WaylandApp::disconnect() {
 
     // destroy objects we created (interfaces don't need destruction)
-    if (m_xdg_toplevel) {
-        xdg_toplevel_destroy(m_xdg_toplevel); m_xdg_toplevel = nullptr;
-    }
-    if (m_xdg_surface) {
-        xdg_surface_destroy(m_xdg_surface); m_xdg_surface = nullptr;
-    }
-    if (m_surface) {
-        wl_surface_destroy(m_surface); m_surface = nullptr;
-    }
-
-    // after all is cleaned up, disconnect
-    if (m_display) {
-        wl_display_disconnect(m_display); m_display = nullptr;
-    }
-
-    // clean up interface pointers
-    m_registry = nullptr;
-    m_compositor = nullptr;
-    m_shm = nullptr;
-    m_xdg_wm_base = nullptr;
-    m_seat = nullptr;
+    m_xdg_toplevel.reset();
+    m_xdg_surface.reset();
+    m_xdg_wm_base.reset();
+    m_surface.reset();
+    m_shm.reset();
+    m_seat.reset();
+    m_compositor.reset();
+    m_registry.reset();
+    m_display.reset();
 
     // reset the rest
     m_window_width = DEFAULT_WINDOW_WIDTH;
@@ -195,7 +233,7 @@ void WaylandApp::enter_event_loop() {
 
     info("WaylandApp::enter_event_loop(): entered");
     assert(m_display != nullptr);
-    while (wl_display_dispatch_pending(m_display) != -1 && !m_close_requested) {
+    while (m_display->dispatch() != -1) {
         revolutions++;
         if (m_redraw_needed) {
             render_frame();
@@ -203,43 +241,11 @@ void WaylandApp::enter_event_loop() {
             redraws++;
         }
         fprintf(stdout, "wayland app running, %d redraws, %d event revs\r", redraws, revolutions);
-        wl_display_dispatch(m_display);
-    }
-}
 
-void WaylandApp::register_global(char const* interface, uint32_t name) {
-    if (strcmp(interface, wl_compositor_interface.name) == 0) {
-        m_compositor = (wl_compositor*)(wl_registry_bind(m_registry, name, &wl_compositor_interface, COMPOSITOR_API_VERSION));
-        info("interface obtained: wl_compositor");
+        if (m_close_requested) {
+            break;
+        }
     }
-    else if (strcmp(interface, wl_shm_interface.name) == 0) {
-        m_shm = (wl_shm*)(wl_registry_bind(m_registry, name, &wl_shm_interface, SHM_API_VERSION));
-        info("interface obtained: wl_shm");
-    }
-    else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
-        m_xdg_wm_base = (xdg_wm_base*) wl_registry_bind(m_registry, name, &xdg_wm_base_interface, 1);
-        info("interface obtained: xdg_wm_base");
-    }
-    else if (strcmp(interface, wl_seat_interface.name) == 0) {
-        m_seat = (wl_seat*) wl_registry_bind(m_registry, name, &wl_seat_interface, SEAT_API_VERSION);
-        info("interface obtained: wl_seat");
-    }
-}
-
-void WaylandApp::on_xdg_wm_base_ping(void *data, xdg_wm_base *xdg_wm_base, uint32_t serial)
-{
-    xdg_wm_base_pong(xdg_wm_base, serial);
-}
-
-void WaylandApp::on_registry_global(void *data, wl_registry *registry,
-        uint32_t name, const char *interface, uint32_t version)
-{
-    the_app->register_global(interface, name);
-}
-
-void WaylandApp::on_registry_global_remove(void *data, struct wl_registry *registry, uint32_t name)
-{
-    // This space deliberately left blank
 }
 
 void WaylandApp::on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial) {
@@ -306,7 +312,7 @@ void WaylandApp::render_frame() {
     int i = 0;
     for (; i<BUFFER_COUNT; i++) {
         if (!m_buffers[i].is_valid()) {
-            m_buffers[i].setup(m_shm, m_window_width, m_window_height);
+            m_buffers[i].setup(m_shm.get(), m_window_width, m_window_height);
             break;
         }
         else if (!m_buffers[i].is_busy()) {
@@ -319,7 +325,7 @@ void WaylandApp::render_frame() {
             else {
                 // not of proper size but also not busy, so reconfigure it
                 m_buffers[i].reset();
-                m_buffers[i].setup(m_shm, m_window_width, m_window_height);
+                m_buffers[i].setup(m_shm.get(), m_window_width, m_window_height);
             }
         }
         // buffer is still in use, don't touch it
@@ -341,7 +347,7 @@ void WaylandApp::render_frame() {
 
     buffer.unmap();
 
-    buffer.present(m_surface);
+    buffer.present(m_surface.get());
     info("frame rendered");
 }
 

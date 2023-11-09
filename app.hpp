@@ -15,22 +15,69 @@
 #include "draw.hpp"
 #include "wayland_buffer.hpp"
 
+namespace wl {
+
+class Display {
+private:
+    wl_display* m_display = nullptr;
+public:
+    Display();
+    ~Display();
+    wl_display* get() { return m_display; }
+    bool is_good() { return !!m_display; }
+    void roundtrip();
+    int dispatch();
+};
+
+class Registry {
+protected:
+    wl_display* m_display = nullptr;
+    wl_registry* m_registry = nullptr;
+    std::map<std::string, uint32_t> m_interfaces;
+public:
+    Registry(Display& dpy);
+    ~Registry();
+    wl_registry* get() { return m_registry; }
+    bool is_good() { return !!m_registry; }
+    uint32_t get_interface_name(std::string interface) { return m_interfaces[interface]; }
+    void* bind(uint32_t name, const wl_interface* interface, uint32_t version);
+
+    template<class T>
+    T* bind(const wl_interface* interface, uint32_t version) {
+        auto cursor = m_interfaces.find(interface->name);
+        if (cursor == m_interfaces.end()) { return nullptr; }
+        return (T*)(wl_registry_bind(m_registry, cursor->second, interface, version));
+    }
+};
+
+} // namespace wl
+
 class WaylandApp {
 protected:
     static WaylandApp* the_app;
 
     // Wayland globals
-    wl_display* m_display = nullptr;
-    wl_registry* m_registry = nullptr;
-    wl_compositor* m_compositor = nullptr;
-    wl_shm* m_shm = nullptr;
-    xdg_wm_base* m_xdg_wm_base = nullptr;
-    wl_seat* m_seat = nullptr;
+    std::unique_ptr<wl::Display> m_display;
+    std::unique_ptr<wl::Registry> m_registry;
+    struct wl_compositor_deleter { void operator()(wl_compositor* c) { wl_compositor_destroy(c); }};
+    std::unique_ptr<wl_compositor, wl_compositor_deleter> m_compositor;
+    struct wl_shm_deleter { void operator()(wl_shm* shm) { wl_shm_destroy(shm); }};
+    std::unique_ptr<wl_shm, wl_shm_deleter> m_shm;
+    struct xdg_wm_base_deleter { void operator()(xdg_wm_base* base) { xdg_wm_base_destroy(base); }};
+    std::unique_ptr<xdg_wm_base, xdg_wm_base_deleter> m_xdg_wm_base;
+    struct wl_seat_deleter { void operator()(wl_seat* s) { wl_seat_destroy(s); }};
+    std::unique_ptr<wl_seat, wl_seat_deleter> m_seat;
 
     // Wayland objects
-    wl_surface* m_surface = nullptr;
-    xdg_surface* m_xdg_surface = nullptr;
-    xdg_toplevel* m_xdg_toplevel = nullptr;
+    struct wl_surface_deleter { void operator()(wl_surface* s) { wl_surface_destroy(s); }};
+    std::unique_ptr<wl_surface, wl_surface_deleter> m_surface;
+    struct xdg_surface_deleter { void operator()(xdg_surface* s) { xdg_surface_destroy(s); }};
+    std::unique_ptr<xdg_surface, xdg_surface_deleter> m_xdg_surface;
+    struct xdg_toplevel_deleter { void operator()(xdg_toplevel* tl) { xdg_toplevel_destroy(tl); }};
+    std::unique_ptr<xdg_toplevel, xdg_toplevel_deleter> m_xdg_toplevel;
+
+    static wl_registry_listener wl_registry_listener_info;
+    static xdg_wm_base_listener xdg_wm_base_listener_info;
 
     static constexpr int BUFFER_COUNT = 4;
     WaylandBuffer m_buffers[BUFFER_COUNT];
@@ -49,7 +96,7 @@ public:
     WaylandApp();
     virtual ~WaylandApp();
 
-    WaylandApp &the();
+    static WaylandApp &the();
 
     bool connect();
     void disconnect();
@@ -59,9 +106,6 @@ public:
 
     // 1st level event handlers
     // these are called by the wayland-client library
-    static void on_xdg_wm_base_ping(void *data, xdg_wm_base *xdg_wm_base, uint32_t serial);
-    static void on_registry_global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version);
-    static void on_registry_global_remove(void *data, struct wl_registry *registry, uint32_t name);
     static void on_buffer_release(void* data, wl_buffer* buffer);
     static void on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial);
     static void on_xdg_toplevel_configure(void* data, struct xdg_toplevel* xdg_toplevel, int32_t width,
@@ -82,6 +126,5 @@ public:
     // 2nd level event handlers
     virtual void draw(DrawingContext ctx);
 
-protected:
-    void register_global(char const* interface, uint32_t name);
+    //void register_global(char const* interface, uint32_t name);
 };
