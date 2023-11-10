@@ -21,6 +21,7 @@ namespace wl {
 class Display {
 private:
     wl_display* m_display = nullptr;
+    wl_display_listener m_listener = { 0 };
 public:
     Display();
     ~Display();
@@ -151,6 +152,7 @@ namespace xdg {
         bool is_good() const { return !!m_surface; }
         bool is_configure_event_pending() const { return m_configure_event_pending; }
         void ack_configure();
+        void set_window_geometry(int32_t x, int32_t y, int32_t width, int32_t height);
     };
 
     // The Wayland equivalent of a window encapsulating a surface.
@@ -162,7 +164,9 @@ namespace xdg {
         bool m_configure_requested = false;
         int m_last_requested_width = 0;
         int m_last_requested_height = 0;
-    public:
+        int32_t m_recommended_max_width = 0;
+        int32_t m_recommended_max_height = 0;
+   public:
         Toplevel(xdg::Surface& surface);
         ~Toplevel();
         xdg_toplevel* get() { return m_toplevel; }
@@ -172,8 +176,10 @@ namespace xdg {
         bool is_configure_requested() const { return m_configure_requested; }
         void clear_configure_request() { m_configure_requested = false; }
         void set_title(std::string title);
-        int get_last_requested_width() const { return m_last_requested_width; }
-        int get_last_requested_height() const { return m_last_requested_height; }
+        int32_t get_last_requested_width() const { return m_last_requested_width; }
+        int32_t get_last_requested_height() const { return m_last_requested_height; }
+        int32_t get_recommended_max_width() const { return m_recommended_max_width; }
+        int32_t get_recommended_max_height() const { return m_recommended_max_height; }
     };
 
     class DecorationManager {

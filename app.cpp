@@ -12,7 +12,14 @@ wl::Display::Display() {
     m_display = wl_display_connect(nullptr);
     if (!m_display) {
         complain("could not connect to Wayland display");
+        return;
     }
+
+    m_listener.error = [](void* self_, wl_display* display, void*, uint32_t code, const char* message){
+        complain("Wayland error: " + std::string(message) + "(code " + std::to_string(code) + ")");
+    };
+
+    wl_display_add_listener(m_display, &m_listener, this);
 }
 
 wl::Display::~Display() {
@@ -185,6 +192,11 @@ void xdg::Surface::ack_configure() {
     m_configure_event_pending = false;
 }
 
+void xdg::Surface::set_window_geometry(int32_t x, int32_t y, int32_t width, int32_t height) {
+    assert(m_surface);
+    xdg_surface_set_window_geometry(m_surface, x, y, width, height);
+}
+
 xdg::Toplevel::Toplevel(xdg::Surface& surface) {
     m_toplevel = xdg_surface_get_toplevel(surface.get());
     if (!m_toplevel) {
@@ -197,11 +209,18 @@ xdg::Toplevel::Toplevel(xdg::Surface& surface) {
         self->m_last_requested_width = width;
         self->m_last_requested_height = height;
         self->m_configure_requested = true;
+        info("configure request received: " + std::to_string(width) + "x" + std::to_string(height));
         // TODO: we should ack this, but how when we don't know the serial number?
     };
     m_listener.close = [](void* self_, xdg_toplevel* toplevel) {
         auto self = (xdg::Toplevel*) self_;
         self->m_close_requested = true;
+    };
+    m_listener.configure_bounds = [](void* self_, xdg_toplevel* toplevel, int32_t width, int32_t height) {
+        auto self = (xdg::Toplevel*) self_;
+        self->m_recommended_max_width = width;
+        self->m_recommended_max_height = height;
+        info("received recommended max dimensions: " + std::to_string(width) + "x" + std::to_string(height));
     };
 
     xdg_toplevel_add_listener(m_toplevel, &m_listener, this);
