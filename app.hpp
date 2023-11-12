@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <list>
 #include <stdio.h>
 #include <wayland-client.h>
 #include "debug.hpp"
@@ -16,31 +18,53 @@
 #include "draw.hpp"
 #include "wayland_buffer.hpp"
 
+struct wl_shm_pool_deleter {
+    void operator()(wl_shm_pool* p) { wl_shm_pool_destroy(p); }
+};
+
+struct wl_buffer_deleter {
+    void operator()(wl_buffer* buf) { wl_buffer_destroy(buf); }
+};
+
 namespace wl {
 
-class Display {
+/// Base class for objects that wrap Wayland objects.
+class WaylandObject {
+public:
+    WaylandObject() {}
+    WaylandObject(WaylandObject const&) = delete;
+    WaylandObject& operator=(WaylandObject const&) = delete;
+    virtual ~WaylandObject() {}
+
+    /// Returns true if the object was created successfully and is ready to use.
+    /// Returns false if the construction has failed and the object is not safe
+    /// to use; on this result, the object should be destroyed.
+    virtual bool is_good() const = 0;
+};
+
+/// Represents the connection to the Wayland display (encapsulates wl_display).
+class Connection : public WaylandObject {
 private:
     wl_display* m_display = nullptr;
     wl_display_listener m_listener = { 0 };
 public:
-    Display();
-    ~Display();
-    wl_display* get() { return m_display; }
-    bool is_good() const { return !!m_display; }
+    Connection();
+    ~Connection();
+    wl_display* operator*() { return m_display; }
+    virtual bool is_good() const override { return !!m_display; }
     void roundtrip();
     int dispatch();
 };
 
-class Registry {
+class Registry : public WaylandObject {
 protected:
-    wl_display* m_display = nullptr;
     wl_registry* m_registry = nullptr;
     std::map<std::string, uint32_t> m_interfaces;
 public:
-    Registry(Display& dpy);
+    Registry(Connection& conn);
     ~Registry();
-    wl_registry* get() { return m_registry; }
-    bool is_good() const { return !!m_registry; }
+    wl_registry* operator*() { return m_registry; }
+    virtual bool is_good() const override { return !!m_registry; }
 
     /// Checks whether an interface of that name is supported.
     template<class T>
@@ -65,7 +89,7 @@ public:
     }
 };
 
-class Compositor {
+class Compositor : public WaylandObject {
 protected:
     wl_compositor* m_compositor = nullptr;
 public:
@@ -73,10 +97,10 @@ public:
     Compositor(Registry& registry);
     ~Compositor();
     wl_compositor* get() { return m_compositor; }
-    bool is_good() const { return !!m_compositor; }
+    virtual bool is_good() const override { return !!m_compositor; }
 };
 
-class Shm {
+class Shm : public WaylandObject {
 protected:
     wl_shm* m_shm = nullptr;
 public:
@@ -84,10 +108,10 @@ public:
     Shm(Registry& registry);
     ~Shm();
     wl_shm* get() { return m_shm; }
-    bool is_good() const { return !!m_shm; }
+    virtual bool is_good() const override { return !!m_shm; }
 };
 
-class Seat {
+class Seat : public WaylandObject {
 protected:
     wl_seat* m_seat = nullptr;
     struct wl_seat_listener m_listener = { 0 };
@@ -100,7 +124,7 @@ public:
     Seat(Registry& registry);
     ~Seat();
     wl_seat* get() { return m_seat; }
-    bool is_good() const { return !!m_seat; }
+    virtual bool is_good() const override { return !!m_seat; }
     std::string get_name() const { return m_name; }
     bool is_pointer_supported() const { return m_pointer_supported; }
     bool is_keyboard_supported() const { return m_keyboard_supported; }
@@ -124,7 +148,7 @@ namespace xdg {
     namespace wm {
 
         /// Base interface of the window manager.
-        class Base {
+        class Base : public wl::WaylandObject {
         protected:
             xdg_wm_base* m_base = nullptr;
             struct xdg_wm_base_listener m_listener = { 0 };
@@ -139,7 +163,7 @@ namespace xdg {
 
     } // namespace xdg::wm
 
-    class Surface {
+    class Surface : public wl::WaylandObject {
     protected:
         xdg_surface* m_surface = nullptr;
         struct xdg_surface_listener m_listener = { 0 };
@@ -156,7 +180,7 @@ namespace xdg {
     };
 
     // The Wayland equivalent of a window encapsulating a surface.
-    class Toplevel {
+    class Toplevel : public wl::WaylandObject {
     protected:
         xdg_toplevel* m_toplevel = nullptr;
         struct xdg_toplevel_listener m_listener = { 0 };
@@ -182,7 +206,7 @@ namespace xdg {
         int32_t get_recommended_max_height() const { return m_recommended_max_height; }
     };
 
-    class DecorationManager {
+    class DecorationManager : public wl::WaylandObject {
     protected:
         zxdg_decoration_manager_v1* m_manager = nullptr;
         const int API_VERSION = 1;
@@ -193,7 +217,7 @@ namespace xdg {
         bool is_good() const { return !!m_manager; }
     };
 
-    class ToplevelDecoration {
+    class ToplevelDecoration : public wl::WaylandObject {
     protected:
         zxdg_toplevel_decoration_v1* m_decoration = nullptr;
     public:
@@ -206,33 +230,86 @@ namespace xdg {
 
 } // namespace xdg
 
+namespace wayland {
+
+class Display {
+protected:
+    std::unique_ptr<wl::Connection>     m_connection;
+    std::unique_ptr<wl::Registry>       m_registry;
+    std::unique_ptr<wl::Compositor>     m_compositor;
+    std::unique_ptr<wl::Shm>            m_shm;
+    std::unique_ptr<wl::Seat>           m_seat;
+    std::unique_ptr<xdg::wm::Base>      m_wm_base;
+    std::unique_ptr<xdg::DecorationManager> m_decoration_manager;
+    bool m_good = false;
+public:
+    Display();
+    bool is_good() const { return m_good; }
+    wl::Connection& get_connection() { return *m_connection; }
+    wl::Compositor& get_compositor() { return *m_compositor; }
+    wl::Shm& get_shm() { return *m_shm; }
+    wl::Seat& get_seat() { return *m_seat; }
+    xdg::wm::Base& get_wm_base() { return *m_wm_base; }
+    xdg::DecorationManager& get_decoration_manager() { return *m_decoration_manager; }
+};
+
+class Window {
+protected:
+    std::unique_ptr<wl::Surface>    m_surface;
+    std::unique_ptr<xdg::Surface>   m_xdg_surface;
+    std::unique_ptr<xdg::Toplevel>  m_toplevel;
+    std::unique_ptr<xdg::ToplevelDecoration> m_decoration;
+    bool m_good = false;
+public:
+    Window(wayland::Display& display);
+    ~Window() {}
+    bool is_good() const { return m_good; }
+    wl::Surface& get_surface() { return *m_surface; }
+    xdg::Surface& get_xdg_surface() { return *m_xdg_surface; }
+    xdg::Toplevel& get_toplevel() { return *m_toplevel; }
+};
+
+class Frame {
+protected:
+    void*   m_memory = nullptr;
+    int32_t m_size = 0;
+    int32_t m_width = 0;
+    int32_t m_height = 0;
+    std::unique_ptr<wl_buffer, wl_buffer_deleter> m_buffer;
+    wl_buffer_listener m_listener = { 0 };
+    bool    m_good = false;
+    bool    m_attached = false;
+public:
+    Frame(wayland::Display& display, int32_t width, int32_t height);
+    ~Frame();
+    bool is_good() const { return m_good; }
+    void attach(wayland::Window& window);
+    void* get_memory() { return m_memory; }
+    int32_t get_width() const { return m_width; }
+    int32_t get_height() const { return m_height; }
+};
+
+} // namespace wayland
+
 class WaylandApp {
 protected:
     static WaylandApp* the_app;
 
-    // Wayland globals (existing on the server, we only bind to them)
-    std::unique_ptr<wl::Display>    m_display;
-    std::unique_ptr<wl::Registry>   m_registry;
-    std::unique_ptr<wl::Compositor> m_compositor;
-    std::unique_ptr<wl::Shm>        m_shm;
-    std::unique_ptr<xdg::wm::Base>  m_base;
-    std::unique_ptr<wl::Seat>       m_seat;
+    std::unique_ptr<wayland::Display> m_display;
+    std::unique_ptr<wayland::Window> m_window;
 
-    // Wayland objects (owned by us)
-    std::unique_ptr<wl::Surface>    m_surface;
-    std::unique_ptr<xdg::Surface>   m_xdg_surface;
-    std::unique_ptr<xdg::Toplevel>  m_toplevel;
-    std::unique_ptr<xdg::DecorationManager> m_decoration_manager;
-    std::unique_ptr<xdg::ToplevelDecoration> m_decoration;
 
-    static constexpr int BUFFER_COUNT = 4;
-    WaylandBuffer m_buffers[BUFFER_COUNT];
+    //WaylandBuffer m_buffers[BUFFER_COUNT];
 
     int m_window_width = DEFAULT_WINDOW_WIDTH;
     int m_window_height = DEFAULT_WINDOW_HEIGHT;
     bool m_close_requested = false;
 
     bool m_redraw_needed = false;
+
+    std::list<wayland::Frame*> m_frames;
+    wayland::Frame* alloc_new_frame(int32_t width, int32_t height);
+    wayland::Frame* fetch_frame(int32_t width, int32_t height);
 
 public:
 
@@ -241,35 +318,18 @@ public:
 
     WaylandApp();
     virtual ~WaylandApp();
-    bool is_good() const { return !!m_toplevel; }
+    bool is_good() const { return m_display->is_good() && m_window->is_good(); }
 
     static WaylandApp &the();
 
-    void enter_event_loop();
-    void render_frame();
-    bool is_close_requested() const { return m_close_requested; }
+    void reconfigure_buffer(int index, int32_t width, int32_t height);
+    int find_unused_buffer();
 
-    // 1st level event handlers
-    // these are called by the wayland-client library
-    static void on_buffer_release(void* data, wl_buffer* buffer);
-    static void on_xdg_surface_configure(void *data, struct xdg_surface *xdg_surface, uint32_t serial);
-    static void on_xdg_toplevel_configure(void* data, struct xdg_toplevel* xdg_toplevel, int32_t width,
-                    int32_t height, struct wl_array *states);
-    static void on_xdg_toplevel_close(void* data, struct xdg_toplevel *xdg_toplevel);
-    static void on_seat_handle_capabilities(void *data, struct wl_seat *seat, uint32_t capabilities);
-    static void on_seat_name(void* data, struct wl_seat* seat, char const* name);
-    static void on_pointer_button(void* data, struct wl_pointer *pointer,
-                    uint32_t serial, uint32_t time, uint32_t button, uint32_t state);
-    static void on_pointer_enter(void* data, struct wl_pointer* pointer,
-                    uint32_t serial, wl_surface*, wl_fixed_t x, wl_fixed_t y);
-    static void on_pointer_leave(void* data, struct wl_pointer* pointer,
-                    uint32_t serial, wl_surface*);
-    static void on_pointer_motion(void *data, struct wl_pointer *wl_pointer,
-               uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y);
-    static void on_pointer_frame(void* data, struct wl_pointer* wl_pointer);
+    void enter_event_loop();
+    void render_frame(wayland::Frame& frame);
+    bool is_close_requested() const { return m_close_requested; }
 
     // 2nd level event handlers
     virtual void draw(DrawingContext ctx);
 
-    //void register_global(char const* interface, uint32_t name);
 };

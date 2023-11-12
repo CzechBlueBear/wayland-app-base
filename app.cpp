@@ -7,42 +7,42 @@
 #include <cassert>
 #include <cerrno>
 #include <cstring>
+#include <sys/mman.h>
 
-wl::Display::Display() {
+wl::Connection::Connection() {
     m_display = wl_display_connect(nullptr);
     if (!m_display) {
-        complain("could not connect to Wayland display");
+        complain("could not connect to Wayland server: " + errno_to_string());
         return;
     }
 
     m_listener.error = [](void* self_, wl_display* display, void*, uint32_t code, const char* message){
-        complain("Wayland error: " + std::string(message) + "(code " + std::to_string(code) + ")");
+        complain("Wayland client error: " + std::string(message));
     };
 
     wl_display_add_listener(m_display, &m_listener, this);
 }
 
-wl::Display::~Display() {
+wl::Connection::~Connection() {
     if (m_display) {
         wl_display_disconnect(m_display);
     }
 }
 
-void wl::Display::roundtrip() {
+void wl::Connection::roundtrip() {
     assert(m_display);
     wl_display_roundtrip(m_display);
 }
 
-int wl::Display::dispatch() {
+int wl::Connection::dispatch() {
+    assert(m_display);
     return wl_display_dispatch(m_display);
 }
 
-wl::Registry::Registry(wl::Display& dpy) {
-    m_display = dpy.get();
-
-    m_registry = wl_display_get_registry(m_display);
+wl::Registry::Registry(wl::Connection& conn) {
+    m_registry = wl_display_get_registry(*conn);
     if (!m_registry) {
-        complain("could not create Wayland registry");
+        complain("could not bind to Wayland registry");
     }
 
     static const wl_registry_listener listener {
@@ -257,6 +257,119 @@ void xdg::ToplevelDecoration::set_server_side_mode() {
     zxdg_toplevel_decoration_v1_set_mode(m_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 }
 
+wayland::Display::Display() {
+    m_connection= std::make_unique<wl::Connection>();
+    if (!m_connection) { return; }
+    m_registry = std::make_unique<wl::Registry>(*m_connection);
+    if (!m_registry) { return; }
+
+    // during this roundtrip, the server should send us IDs of many globals,
+    // including the compositor, SHM and XDG windowmanager base, and seat
+    m_connection->roundtrip();
+
+    m_compositor = std::make_unique<wl::Compositor>(*m_registry);
+    if (!m_compositor) { return; }
+    m_shm = std::make_unique<wl::Shm>(*m_registry);
+    if (!m_shm) { return; }
+    m_seat = std::make_unique<wl::Seat>(*m_registry);
+    if (!m_seat) { return; }
+    m_wm_base = std::make_unique<xdg::wm::Base>(*m_registry);
+    if (!m_wm_base) { return; }
+
+    // if we got here, we are good
+    m_good = true;
+}
+
+wayland::Window::Window(wayland::Display& display) {
+    m_surface = std::make_unique<wl::Surface>(display.get_compositor());
+    if (!m_surface->is_good()) { return; }
+    m_xdg_surface = std::make_unique<xdg::Surface>(display.get_wm_base(), *m_surface);
+    if (!m_xdg_surface->is_good()) { return; }
+    m_toplevel = std::make_unique<xdg::Toplevel>(*m_xdg_surface);
+    if (!m_toplevel->is_good()) { return; }
+    m_good = true;
+}
+
+wayland::Frame::Frame(wayland::Display& display, int32_t width, int32_t height) {
+    assert(width >= 0 && height >= 0);
+
+    int32_t size = width*height*4;  // 4 bytes per pixel (XRGB or ARGB)
+
+    // an anonymous in-memory file to share with the Wayland server
+    int fd = memfd_create("frame", MFD_CLOEXEC|MFD_ALLOW_SEALING);
+    if (!fd) {
+        complain("frame: memfd_create() failed: " + errno_to_string());
+        return;
+    }
+    for(;;) {
+        int ret = ftruncate(fd, size);
+        if (ret == 0) { break; }
+        if (errno != EINTR) {
+            complain("frame: ftruncate() failed: " + errno_to_string());
+            close(fd);
+            return;
+        }
+    }
+    void* memory = mmap(nullptr, size, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (memory == MAP_FAILED) {
+        complain("frame: mmap() failed: " + errno_to_string());
+        close(fd);
+        return;
+    }
+
+    // temporary pool to allocate the frame from (deleted at the end of this call)
+    std::unique_ptr<wl_shm_pool, wl_shm_pool_deleter> pool(
+        wl_shm_create_pool(display.get_shm().get(), fd, size));
+    if (!pool) {
+        complain("frame: wl_shm_create_pool() failed: " + errno_to_string());
+        munmap(memory, size);
+        close(fd);
+        return;
+    }
+
+    int32_t stride = width*4;
+
+    // allocate the given size of the buffer from the pool
+    std::unique_ptr<wl_buffer, wl_buffer_deleter> buffer {
+        wl_shm_pool_create_buffer(pool.get(), 0, width, height, stride, WL_SHM_FORMAT_XRGB8888)
+    };
+    if (!buffer) {
+        complain("frame: wl_shm_pool_create_buffer() failed: " + errno_to_string());
+        munmap(memory, size);
+        close(fd);
+        return;
+    }
+
+    // close filedescriptor to conserve them; the mapping stays
+    close(fd);
+
+    // install a listener to inform us when the Wayland server releases the buffer
+    m_listener.release = [](void* self_, wl_buffer* buffer) {
+        auto self = (wayland::Frame*) self_;
+        delete self;
+        //self->m_attached = false;
+    };
+    wl_buffer_add_listener(buffer.get(), &m_listener, this);
+
+    m_memory = memory;
+    m_size = size;
+    m_width = width;
+    m_height = height;
+    m_buffer = std::move(buffer);
+    m_good = true;
+}
+
+wayland::Frame::~Frame() {
+    munmap(m_memory, m_size);
+}
+
+void wayland::Frame::attach(wayland::Window& window) {
+    assert(m_good);
+    assert(!m_attached);
+    m_attached = true;
+    wl_surface_attach(window.get_surface().get(), m_buffer.get(), 0, 0);
+}
+
 WaylandApp* WaylandApp::the_app = nullptr;
 
 /**
@@ -271,62 +384,20 @@ WaylandApp::~WaylandApp() {
     the_app = nullptr;
 }
 
-// coherent naming of listeners (to preserve our sanity):
-// if structure is A_B_C_listener, then instance is A_B_C_listener_info,
-// and callbacks are called WaylandApp::on_A_B_C_something().
-
-static const struct wl_pointer_listener pointer_listener = {
-    .enter = WaylandApp::on_pointer_enter,
-    .leave = WaylandApp::on_pointer_leave,
-    .motion = WaylandApp::on_pointer_motion,
-    .button = WaylandApp::on_pointer_button,
-    .frame = WaylandApp::on_pointer_frame,
-    //.axis = noop, // TODO
-};
-
 WaylandApp::WaylandApp() {
     assert(!the_app);
     the_app = this;
 
-    m_display = std::make_unique<wl::Display>();
+    m_display = std::make_unique<wayland::Display>();
     if (!m_display->is_good()) {
+        complain("display initialization failed");
         return;
     }
 
-    m_registry = std::make_unique<wl::Registry>(*m_display);
-    if (!m_registry->is_good()) {
+    m_window = std::make_unique<wayland::Window>(*m_display);
+    if (!m_window->is_good()) {
+        complain("window initialization failed");
         return;
-    }
-
-    // during this roundtrip, the server should send us IDs of many globals,
-    // including the compositor, SHM and XDG windowmanager base, and seat;
-    // for each global, the on_registry_global() callback is called automatically
-    m_display->roundtrip();
-
-    m_compositor = std::make_unique<wl::Compositor>(*m_registry);
-    m_shm = std::make_unique<wl::Shm>(*m_registry);
-    m_base = std::make_unique<xdg::wm::Base>(*m_registry);
-    m_seat = std::make_unique<wl::Seat>(*m_registry);
-
-    m_surface = std::make_unique<wl::Surface>(*m_compositor);
-    m_xdg_surface = std::make_unique<xdg::Surface>(*m_base, *m_surface);
-    m_surface->commit();
-
-    m_toplevel = std::make_unique<xdg::Toplevel>(*m_xdg_surface);
-    m_surface->commit();
-
-    m_toplevel->set_title("Example client");
-
-    m_decoration_manager = std::make_unique<xdg::DecorationManager>(*m_registry);
-    if (m_decoration_manager->is_good()) {
-        m_decoration = std::make_unique<xdg::ToplevelDecoration>(*m_decoration_manager, *m_toplevel);
-        if (m_decoration->is_good()) {
-            m_decoration->set_server_side_mode();
-        }
-    }
-
-    if (m_xdg_surface->is_configure_event_pending()) {
-        m_xdg_surface->ack_configure();
     }
 }
 
@@ -341,86 +412,52 @@ void WaylandApp::enter_event_loop() {
     int redraws = 0;
     int revolutions = 0;
 
+    int32_t wanted_width = DEFAULT_WINDOW_WIDTH;
+    int32_t wanted_height = DEFAULT_WINDOW_HEIGHT;
+
     // first render
-    render_frame();
+    auto frame = new wayland::Frame(*m_display, wanted_width, wanted_height);
+    render_frame(*frame);
+    frame->attach(*m_window);
 
     bool need_redraw = true;
-    while (m_display->dispatch() != -1) {
+    while (m_display->get_connection().dispatch() != -1) {
         revolutions++;
 
-        if (m_xdg_surface->is_configure_event_pending()) {
-            m_xdg_surface->ack_configure();
+        if (m_window->get_xdg_surface().is_configure_event_pending()) {
+            wanted_width = m_window->get_toplevel().get_last_requested_width();
+            wanted_height = m_window->get_toplevel().get_last_requested_height();
+            if (wanted_width == 0) {
+                wanted_width = DEFAULT_WINDOW_WIDTH;
+            }
+            if (wanted_height == 0) {
+                wanted_height = DEFAULT_WINDOW_HEIGHT;
+            }
+            m_window->get_xdg_surface().ack_configure();
             need_redraw = true;
         }
 
         if (need_redraw) {
-            render_frame();
-            need_redraw = false;
+            auto frame = new wayland::Frame(*m_display, wanted_width, wanted_height);
+            render_frame(*frame);
+            frame->attach(*m_window);
+            m_window->get_surface().commit();
             redraws++;
         }
         fprintf(stdout, "wayland app running, %d redraws, %d event revs\r", redraws, revolutions);
 
-        if (m_toplevel->is_close_requested()) {
+        if (m_window->get_toplevel().is_close_requested()) {
             break;
         }
     }
 }
 
-void WaylandApp::on_pointer_button(void *data, struct wl_pointer *pointer,
-        uint32_t serial, uint32_t time, uint32_t button, uint32_t state)
-{
-    struct wl_seat* seat = (wl_seat*) data;
-
-/*
-    if (button == BTN_LEFT && state == WL_POINTER_BUTTON_STATE_PRESSED) {
-        xdg_toplevel_move(the_app->m_xdg_toplevel, seat, serial);
-    }
-*/
-}
-
-void WaylandApp::render_frame() {
-    info("rendering frame");
-
-    int i = 0;
-    for (; i<BUFFER_COUNT; i++) {
-        if (!m_buffers[i].is_valid()) {
-            m_buffers[i].setup(m_shm.get()->get(), m_window_width, m_window_height);
-            break;
-        }
-        else if (!m_buffers[i].is_busy()) {
-            if (
-                (m_buffers[i].get_width() == m_window_width)
-                && (m_buffers[i].get_height() == m_window_height)
-            ) {
-                break;
-            }
-            else {
-                // not of proper size but also not busy, so reconfigure it
-                m_buffers[i].reset();
-                m_buffers[i].setup(m_shm.get()->get(), m_window_width, m_window_height);
-            }
-        }
-        // buffer is still in use, don't touch it
-    }
-    if (i == BUFFER_COUNT) {
-        complain("all buffers are in use, skipping frame");
-        return;
-    }
-
-    auto &buffer = m_buffers[i];
-
-    buffer.map();
-
+void WaylandApp::render_frame(wayland::Frame& frame) {
     DrawingContext dc = DrawingContext(
-        (uint32_t*)buffer.get_pixels(),
-        buffer.get_width(),
-        buffer.get_height());
+        (uint32_t*) frame.get_memory(),
+        frame.get_width(),
+        frame.get_height());
     draw(dc);
-
-    buffer.unmap();
-
-    buffer.present(m_surface.get()->get());
-    info("frame rendered");
 }
 
 void WaylandApp::draw(DrawingContext ctx) {
