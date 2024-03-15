@@ -285,6 +285,7 @@ protected:
 
     std::list<wayland::Frame*> m_frames;
     wayland::Frame* get_new_frame(int32_t width, int32_t height);
+    void purge_badly_sized_frames(int32_t width, int32_t height);
 
 public:
 

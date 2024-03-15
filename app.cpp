@@ -332,7 +332,6 @@ wayland::Frame::Frame(wayland::Display& display, int32_t width, int32_t height) 
     m_listener.release = [](void* self_, wl_buffer* buffer) {
         auto self = (wayland::Frame*) self_;
         self->m_buffer_busy = false;
-        info("frame buffer released");
     };
     wl_buffer_add_listener(buffer.get(), &m_listener, this);
 
@@ -383,30 +382,37 @@ WaylandApp::WaylandApp() {
     m_window = std::make_unique<wayland::Window>(*m_display);
 }
 
-wayland::Frame* WaylandApp::get_new_frame(int32_t width, int32_t height) {
+void WaylandApp::purge_badly_sized_frames(int32_t width, int32_t height) {
 
-    // try to find an already allocated frame and reuse it;
-    // in the same step, discard frames with unsuitable dimensions
+    // discard all cached frames that have unsuitable dimensions
+    // (they will exist every time the window is resized)
     bool restart_search;
     do {
         restart_search = false;
         for (auto frame : m_frames) {
             if (!frame->is_busy()) {
-                if (frame->get_width() == width && frame->get_height() == height) {
-                    info("frame reused, currently got " + std::to_string(m_frames.size()) + " frames");
-                    return frame;
-                }
-                else {
-                    // frame has unsuitable dimensions, discard it
-                    info("discarded frame of unsuitable dimensions");
+                if (frame->get_width() != width || frame->get_height() != height) {
                     m_frames.remove(frame);
                     delete frame;
                     restart_search = true;
-                    break;
+                    info("purged an improperly sized frame");
                 }
             }
         }
-    } while (restart_search);
+    } while(restart_search);
+}
+
+wayland::Frame* WaylandApp::get_new_frame(int32_t width, int32_t height) {
+    purge_badly_sized_frames(width, height);
+
+    // try to find an already allocated frame of appropriate size and reuse it
+    for (auto frame : m_frames) {
+        if (!frame->is_busy()) {
+            if (frame->get_width() == width && frame->get_height() == height) {
+                return frame;
+            }
+        }
+    }
 
     // no suitable frame was found in the list, so create a new one
     auto frame = new wayland::Frame(*m_display, width, height);
@@ -458,7 +464,8 @@ void WaylandApp::enter_event_loop() {
             m_window->get_surface().commit();
             redraws++;
         }
-        fprintf(stdout, "wayland app running, %d redraws, %d revolutions\r", redraws, revolutions);
+        fprintf(stdout, "wayland app running, %d redraws, %d revolutions, %zu frames cached\r",
+            redraws, revolutions, m_frames.size());
 
         if (m_window->get_toplevel().is_close_requested()) {
             break;
