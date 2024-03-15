@@ -35,11 +35,6 @@ public:
     WaylandObject(WaylandObject const&) = delete;
     WaylandObject& operator=(WaylandObject const&) = delete;
     virtual ~WaylandObject() {}
-
-    /// Returns true if the object was created successfully and is ready to use.
-    /// Returns false if the construction has failed and the object is not safe
-    /// to use; on this result, the object should be destroyed.
-    virtual bool is_good() const = 0;
 };
 
 /// Represents the connection to the Wayland display (encapsulates wl_display).
@@ -50,7 +45,6 @@ private:
 public:
     Connection();
     ~Connection();
-    virtual bool is_good() const override { return !!m_display; }
     wl_display* get() { return m_display; }
     void roundtrip();
     int dispatch();
@@ -64,7 +58,6 @@ public:
     Registry(Connection& conn);
     ~Registry();
     wl_registry* operator*() { return m_registry; }
-    virtual bool is_good() const override { return !!m_registry; }
 
     /// Checks whether an interface of that name is supported.
     template<class T>
@@ -97,7 +90,6 @@ public:
     Compositor(Registry& registry);
     ~Compositor();
     wl_compositor* get() { return m_compositor; }
-    virtual bool is_good() const override { return !!m_compositor; }
 };
 
 class Shm : public WaylandObject {
@@ -108,7 +100,6 @@ public:
     Shm(Registry& registry);
     ~Shm();
     wl_shm* get() { return m_shm; }
-    virtual bool is_good() const override { return !!m_shm; }
 };
 
 class Seat : public WaylandObject {
@@ -124,7 +115,6 @@ public:
     Seat(Registry& registry);
     ~Seat();
     wl_seat* get() { return m_seat; }
-    virtual bool is_good() const override { return !!m_seat; }
     std::string get_name() const { return m_name; }
     bool is_pointer_supported() const { return m_pointer_supported; }
     bool is_keyboard_supported() const { return m_keyboard_supported; }
@@ -138,7 +128,6 @@ public:
     Surface(wl::Compositor& compositor);
     ~Surface();
     wl_surface* get() { return m_surface; }
-    bool is_good() const { return !!m_surface; }
     void commit();
 };
 
@@ -157,7 +146,6 @@ namespace xdg {
             Base(wl::Registry& registry);
             ~Base();
             xdg_wm_base* get() { return m_base; }
-            bool is_good() const { return !!m_base; }
             void pong(uint32_t message_id);
         };
 
@@ -173,7 +161,6 @@ namespace xdg {
         Surface(xdg::wm::Base& base, wl::Surface& low_surface);
         ~Surface();
         xdg_surface* get() { return m_surface; }
-        bool is_good() const { return !!m_surface; }
         bool is_configure_event_pending() const { return m_configure_event_pending; }
         void ack_configure();
         void set_window_geometry(int32_t x, int32_t y, int32_t width, int32_t height);
@@ -194,7 +181,6 @@ namespace xdg {
         Toplevel(xdg::Surface& surface);
         ~Toplevel();
         xdg_toplevel* get() { return m_toplevel; }
-        bool is_good() const { return !!m_toplevel; }
         bool is_close_requested() const { return m_close_requested; }
         void clear_close_request() { m_close_requested = false; }
         bool is_configure_requested() const { return m_configure_requested; }
@@ -214,7 +200,6 @@ namespace xdg {
         DecorationManager(wl::Registry& registry);
         ~DecorationManager();
         zxdg_decoration_manager_v1* get() { return m_manager; }
-        bool is_good() const { return !!m_manager; }
     };
 
     class ToplevelDecoration : public wl::WaylandObject {
@@ -224,7 +209,6 @@ namespace xdg {
         ToplevelDecoration(xdg::DecorationManager& manager, xdg::Toplevel& toplevel);
         ~ToplevelDecoration();
         zxdg_toplevel_decoration_v1* get() { return m_decoration; }
-        bool is_good() const { return !!m_decoration; }
         void set_server_side_mode();
     };
 
@@ -273,7 +257,7 @@ protected:
     int32_t m_height = 0;
     std::unique_ptr<wl_buffer, wl_buffer_deleter> m_buffer;
     wl_buffer_listener m_listener = { 0 };
-    bool    m_attached = false;
+    bool    m_buffer_busy = false;
 public:
     Frame(wayland::Display& display, int32_t width, int32_t height);
     ~Frame();
@@ -281,6 +265,7 @@ public:
     void* get_memory() { return m_memory; }
     int32_t get_width() const { return m_width; }
     int32_t get_height() const { return m_height; }
+    bool is_busy() const { return m_buffer_busy; }
 };
 
 } // namespace wayland
