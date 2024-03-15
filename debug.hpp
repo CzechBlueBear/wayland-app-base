@@ -9,4 +9,5 @@ void do_complain(char const* where, std::string const& message);
 void do_info(char const* where, char const* message);
 void do_info(char const* where, std::string const& message);
 
+std::string errno_to_string(int error_code);
 std::string errno_to_string();

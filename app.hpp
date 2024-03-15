@@ -50,8 +50,8 @@ private:
 public:
     Connection();
     ~Connection();
-    wl_display* operator*() { return m_display; }
     virtual bool is_good() const override { return !!m_display; }
+    wl_display* get() { return m_display; }
     void roundtrip();
     int dispatch();
 };
@@ -241,10 +241,8 @@ protected:
     std::unique_ptr<wl::Seat>           m_seat;
     std::unique_ptr<xdg::wm::Base>      m_wm_base;
     std::unique_ptr<xdg::DecorationManager> m_decoration_manager;
-    bool m_good = false;
 public:
     Display();
-    bool is_good() const { return m_good; }
     wl::Connection& get_connection() { return *m_connection; }
     wl::Compositor& get_compositor() { return *m_compositor; }
     wl::Shm& get_shm() { return *m_shm; }
@@ -259,11 +257,9 @@ protected:
     std::unique_ptr<xdg::Surface>   m_xdg_surface;
     std::unique_ptr<xdg::Toplevel>  m_toplevel;
     std::unique_ptr<xdg::ToplevelDecoration> m_decoration;
-    bool m_good = false;
 public:
     Window(wayland::Display& display);
     ~Window() {}
-    bool is_good() const { return m_good; }
     wl::Surface& get_surface() { return *m_surface; }
     xdg::Surface& get_xdg_surface() { return *m_xdg_surface; }
     xdg::Toplevel& get_toplevel() { return *m_toplevel; }
@@ -277,12 +273,10 @@ protected:
     int32_t m_height = 0;
     std::unique_ptr<wl_buffer, wl_buffer_deleter> m_buffer;
     wl_buffer_listener m_listener = { 0 };
-    bool    m_good = false;
     bool    m_attached = false;
 public:
     Frame(wayland::Display& display, int32_t width, int32_t height);
     ~Frame();
-    bool is_good() const { return m_good; }
     void attach(wayland::Window& window);
     void* get_memory() { return m_memory; }
     int32_t get_width() const { return m_width; }
@@ -298,9 +292,6 @@ protected:
     std::unique_ptr<wayland::Display> m_display;
     std::unique_ptr<wayland::Window> m_window;
 
-
-    //WaylandBuffer m_buffers[BUFFER_COUNT];
-
     int m_window_width = DEFAULT_WINDOW_WIDTH;
     int m_window_height = DEFAULT_WINDOW_HEIGHT;
     bool m_close_requested = false;
@@ -308,8 +299,7 @@ protected:
     bool m_redraw_needed = false;
 
     std::list<wayland::Frame*> m_frames;
-    wayland::Frame* alloc_new_frame(int32_t width, int32_t height);
-    wayland::Frame* fetch_frame(int32_t width, int32_t height);
+    wayland::Frame* get_new_frame(int32_t width, int32_t height);
 
 public:
 
@@ -318,7 +308,6 @@ public:
 
     WaylandApp();
     virtual ~WaylandApp();
-    bool is_good() const { return m_display->is_good() && m_window->is_good(); }
 
     static WaylandApp &the();
 
@@ -331,5 +320,4 @@ public:
 
     // 2nd level event handlers
     virtual void draw(DrawingContext ctx);
-
 };
