@@ -12,11 +12,11 @@
 #include <string>
 #include <linux/input-event-codes.h>
 #include <memory>
+#include <unistd.h>
 #include <functional>
 
 #include "box.hpp"
 #include "draw.hpp"
-#include "wayland_buffer.hpp"
 
 struct wl_shm_pool_deleter {
     void operator()(wl_shm_pool* p) { wl_shm_pool_destroy(p); }

@@ -4,9 +4,7 @@ APPNAME=app
 OBJS= app.o \
 	debug.o \
 	draw.o \
-	main.o \
-	shm_util.o \
-	wayland_buffer.o
+	main.o
 
 WAYLAND_OBJS= \
 	xdg-shell-protocol.o \
