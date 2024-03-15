@@ -4,7 +4,8 @@ APPNAME=app
 OBJS= app.o \
 	debug.o \
 	draw.o \
-	main.o
+	main.o \
+	frame.o
 
 WAYLAND_OBJS= \
 	xdg-shell-protocol.o \

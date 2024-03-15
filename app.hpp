@@ -12,19 +12,19 @@
 #include <memory>
 #include <unistd.h>
 
+#include "frame.hpp"
 #include "draw.hpp"
 
 struct wl_shm_pool_deleter {
     void operator()(wl_shm_pool* p) { wl_shm_pool_destroy(p); }
 };
 
-struct wl_buffer_deleter {
-    void operator()(wl_buffer* buf) { wl_buffer_destroy(buf); }
-};
-
 namespace wl {
 
-/// Base class for objects that wrap Wayland objects.
+/**
+ * Base class for objects that wrap Wayland objects.
+ * These cannot be copied nor trivially constructed.
+ */
 class WaylandObject {
 public:
     WaylandObject() {}
@@ -46,6 +46,9 @@ public:
     int dispatch();
 };
 
+/**
+ * Registry of API interfaces that are supported by the Wayland server.
+ */
 class Registry : public WaylandObject {
 protected:
     wl_registry* m_registry = nullptr;
@@ -55,14 +58,23 @@ public:
     ~Registry();
     wl_registry* operator*() { return m_registry; }
 
-    /// Checks whether an interface of that name is supported.
+    /**
+     * Checks whether an interface of that name is supported.
+     * The server announces the supported interfaces in the first roundtrip
+     * after we connect.
+     */
     template<class T>
     bool has_interface(std::string interface_name) {
         auto cursor = m_interfaces.find(interface_name);
         return (cursor != m_interfaces.end());
     }
 
-    /// Requests the given interface with specified version.
+    /**
+     * Requests the given Wayland interface with specified version,
+     * and announces the use of it to the Wayland server.
+     * Returns the structure representing the interface.
+     * Returns null if this fails (the server does not support the interface).
+     */
     template<class T>
     T* bind(const wl_interface* interface, uint32_t version) {
         auto cursor = m_interfaces.find(interface->name);
@@ -117,7 +129,7 @@ public:
     bool is_touch_supported() const { return m_touch_supported; }
 };
 
-class Surface {
+class Surface : public WaylandObject {
 protected:
     wl_surface* m_surface = nullptr;
 public:
@@ -243,30 +255,6 @@ public:
     wl::Surface& get_surface() { return *m_surface; }
     xdg::Surface& get_xdg_surface() { return *m_xdg_surface; }
     xdg::Toplevel& get_toplevel() { return *m_toplevel; }
-};
-
-/**
- * A renderable frame placed in a buffer shared with the Wayland server.
- * Use attach() to add it to a windows' frame queue and then check with is_busy()
- * if it is still in use. All drawing to the frame can only occur when not busy.
- */
-class Frame {
-protected:
-    void*   m_memory = nullptr;
-    int32_t m_size = 0;
-    int32_t m_width = 0;
-    int32_t m_height = 0;
-    std::unique_ptr<wl_buffer, wl_buffer_deleter> m_buffer;
-    wl_buffer_listener m_listener = { 0 };
-    bool    m_buffer_busy = false;
-public:
-    Frame(wayland::Display& display, int32_t width, int32_t height);
-    ~Frame();
-    void attach(wayland::Window& window);
-    void* get_memory() { return m_memory; }
-    int32_t get_width() const { return m_width; }
-    int32_t get_height() const { return m_height; }
-    bool is_busy() const { return m_buffer_busy; }
 };
 
 } // namespace wayland
