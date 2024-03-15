@@ -396,6 +396,7 @@ void WaylandApp::purge_badly_sized_frames(int32_t width, int32_t height) {
                     delete frame;
                     restart_search = true;
                     info("purged an improperly sized frame");
+                    break;
                 }
             }
         }
