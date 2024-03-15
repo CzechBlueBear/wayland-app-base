@@ -249,6 +249,11 @@ public:
     xdg::Toplevel& get_toplevel() { return *m_toplevel; }
 };
 
+/**
+ * A renderable frame placed in a buffer shared with the Wayland server.
+ * Use attach() to add it to a windows' frame queue and then check with is_busy()
+ * if it is still in use. All drawing to the frame can only occur when not busy.
+ */
 class Frame {
 protected:
     void*   m_memory = nullptr;

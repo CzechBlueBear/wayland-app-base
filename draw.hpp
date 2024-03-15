@@ -2,6 +2,11 @@
 
 #include <cstdint>
 
+/**
+ * A context and a set of functions for simple drawing into a memory buffer
+ * of RGBA8888 or BGRA8888 format.
+ * Does not hold any heap-allocated data by itself (destructor is trivial).
+ */
 struct DrawingContext {
 protected:
     uint32_t* m_pixels = nullptr;
