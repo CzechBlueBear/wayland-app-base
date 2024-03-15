@@ -2,20 +2,16 @@
 
 #include <cstdint>
 #include <list>
-#include <stdio.h>
 #include <wayland-client.h>
 #include "debug.hpp"
 #include "xdg-shell-client-protocol.h"
 #include "zxdg-decoration-client-protocol.h"
-#include <array>
 #include <map>
 #include <string>
 #include <linux/input-event-codes.h>
 #include <memory>
 #include <unistd.h>
-#include <functional>
 
-#include "box.hpp"
 #include "draw.hpp"
 
 struct wl_shm_pool_deleter {

@@ -343,7 +343,7 @@ wayland::Frame::Frame(wayland::Display& display, int32_t width, int32_t height) 
 }
 
 wayland::Frame::~Frame() {
-    assert(!m_buffer_busy);
+    // assert(!m_buffer_busy);  // this is allowed when destroying the window
     munmap(m_memory, m_size);
 }
 
@@ -445,6 +445,10 @@ void WaylandApp::enter_event_loop() {
     while (m_display->get_connection().dispatch() != -1) {
         revolutions++;
 
+        if (m_close_requested) {
+            break;
+        }
+
         if (m_window->get_xdg_surface().is_configure_event_pending()) {
             wanted_width = m_window->get_toplevel().get_last_requested_width();
             wanted_height = m_window->get_toplevel().get_last_requested_height();
@@ -468,8 +472,9 @@ void WaylandApp::enter_event_loop() {
         fprintf(stdout, "wayland app running, %d redraws, %d revolutions, %zu frames cached\r",
             redraws, revolutions, m_frames.size());
 
+        // handle closing request that is made by clicking on the closing button
         if (m_window->get_toplevel().is_close_requested()) {
-            break;
+            m_close_requested = true;
         }
     }
 }
