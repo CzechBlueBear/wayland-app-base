@@ -4,9 +4,9 @@
 
 //#define _POSIX_C_SOURCE 200112L
 #include <cassert>
-#include <cerrno>
 #include <sys/mman.h>
 #include <stdexcept>
+#include <memory>
 
 wl::Connection::Connection() {
     m_display = wl_display_connect(nullptr);
@@ -84,7 +84,7 @@ wl::Shm::~Shm() {
 wl::Seat::Seat(Registry& registry) {
     m_seat = registry.bind<wl_seat>(&wl_seat_interface, API_VERSION);
     if (!m_seat) {
-        return;
+        throw std::runtime_error("wl::Seat: could not bind to wl_seat");
     }
 
     m_listener.capabilities = [](void* self_, wl_seat* seat, uint32_t caps) {
@@ -122,6 +122,9 @@ wl::Seat::~Seat() {
 
 xdg::wm::Base::Base(wl::Registry& registry) {
     m_base = registry.bind<xdg_wm_base>(&xdg_wm_base_interface, API_VERSION);
+    if (!m_base) {
+        throw std::runtime_error("xdg::wm::Base: could not bind to xdg_wm_base");
+    }
 
     m_listener.ping = [](void* self_, xdg_wm_base* base, uint32_t serial) {
         auto self = (xdg::wm::Base*)self_;
@@ -158,6 +161,17 @@ void wl::Surface::commit() {
     assert(m_surface);
     wl_surface_commit(m_surface);
 }
+
+#if USE_EGL
+
+wl::EGLWindow::EGLWindow(wl::Surface& surface, int width, int height) {
+    m_window = wl_egl_window_create(surface.get(), width, height);
+    if (m_window == EGL_NO_SURFACE) {
+        throw std::runtime_error("wl::EGLWindow: wl_egl_window_create() failed");
+    }
+}
+
+#endif
 
 xdg::Surface::Surface(xdg::wm::Base& base, wl::Surface& low_surface) {
     m_surface = xdg_wm_base_get_xdg_surface(base.get(), low_surface.get());
@@ -230,8 +244,15 @@ void xdg::Toplevel::set_title(std::string title) {
     xdg_toplevel_set_title(m_toplevel, title.c_str());
 }
 
+bool xdg::DecorationManager::is_supported(wl::Registry& registry) {
+    return (registry.has_interface("zxdg_decoration_manager_v1"));
+}
+
 xdg::DecorationManager::DecorationManager(wl::Registry& registry) {
     m_manager = registry.bind<zxdg_decoration_manager_v1>(&zxdg_decoration_manager_v1_interface, API_VERSION);
+    if (!m_manager) {
+        throw std::runtime_error("xdg::DecorationManager: could not bind to zxdg_decoration_manager_v1");
+    }
 }
 
 xdg::DecorationManager::~DecorationManager() {
@@ -240,6 +261,9 @@ xdg::DecorationManager::~DecorationManager() {
 
 xdg::ToplevelDecoration::ToplevelDecoration(xdg::DecorationManager& manager, xdg::Toplevel& toplevel) {
     m_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(manager.get(), toplevel.get());
+    if (!m_decoration) {
+        throw std::runtime_error("xdg::ToplevelDecoration: zxdg_decoration_manager_v1_get_toplevel_decoration() failed");
+    }
 }
 
 xdg::ToplevelDecoration::~ToplevelDecoration() {
@@ -265,15 +289,19 @@ wayland::Display::Display() {
     m_shm = std::make_unique<wl::Shm>(*m_registry);
     m_seat = std::make_unique<wl::Seat>(*m_registry);
     m_wm_base = std::make_unique<xdg::wm::Base>(*m_registry);
-    m_decoration_manager = std::make_unique<xdg::DecorationManager>(*m_registry);
+    if (xdg::DecorationManager::is_supported(*m_registry)) {
+        m_decoration_manager = std::make_unique<xdg::DecorationManager>(*m_registry);
+    }
 }
 
 wayland::Window::Window(wayland::Display& display) {
     m_surface = std::make_unique<wl::Surface>(display.get_compositor());
     m_xdg_surface = std::make_unique<xdg::Surface>(display.get_wm_base(), *m_surface);
     m_toplevel = std::make_unique<xdg::Toplevel>(*m_xdg_surface);
-    m_decoration = std::make_unique<xdg::ToplevelDecoration>(
-        display.get_decoration_manager(), *m_toplevel);
+    if (display.has_decoration_manager()) {
+        m_decoration = std::make_unique<xdg::ToplevelDecoration>(
+            display.get_decoration_manager(), *m_toplevel);
+    }
 }
 
 WaylandApp* WaylandApp::the_app = nullptr;

@@ -1,27 +1,36 @@
 
 APPNAME=app
 
-OBJS= app.o \
-	debug.o \
-	draw.o \
-	main.o \
-	frame.o
-
-WAYLAND_OBJS= \
-	xdg-shell-protocol.o \
-	zxdg-decoration-protocol.o
-
-WAYLAND_HEADERS= \
-	xdg-shell-client-protocol.h \
-	zxdg-decoration-client-protocol.h
-
-LINK_LIBS=-lwayland-client -lrt
+BUILDDIR=build
+SRCDIR=src
+GENSRCDIR=src/generated
 
 C_COMPILER=clang
 CXX_COMPILER=clang++
 LINKER=clang++
 C_FLAGS=-ggdb -O
 CXX_FLAGS=-ggdb -O
+
+#SWITCHES=-DUSE_EGL=1
+SWITCHES=
+
+OBJS= ${BUILDDIR}/app.o \
+	${BUILDDIR}/debug.o \
+	${BUILDDIR}/draw.o \
+	${BUILDDIR}/main.o \
+	${BUILDDIR}/frame.o
+
+WAYLAND_OBJS= \
+	${BUILDDIR}/xdg-shell-protocol.o \
+	${BUILDDIR}/zxdg-decoration-protocol.o
+
+WAYLAND_HEADERS= \
+	${SRCDIR}/generated/xdg-shell-client-protocol.h \
+	${SRCDIR}/generated/zxdg-decoration-client-protocol.h
+
+INCLUDES=-I${SRCDIR} -I${SRCDIR}/generated
+
+LINK_LIBS=-lwayland-client -lrt
 
 all: app
 
@@ -31,19 +40,19 @@ all: app
 # these files are generated from XML descriptions of the Wayland protocol
 #---
 
-xdg-shell-protocol.c:
+${GENSRCDIR}/xdg-shell-protocol.c:
 	wayland-scanner private-code > $@ \
 	  < /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
 
-xdg-shell-client-protocol.h:
+${GENSRCDIR}/xdg-shell-client-protocol.h:
 	wayland-scanner client-header > $@ \
 		< /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
 
-zxdg-decoration-protocol.c:
+${GENSRCDIR}/zxdg-decoration-protocol.c:
 	wayland-scanner private-code > $@ \
 		< /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
 
-zxdg-decoration-client-protocol.h:
+${GENSRCDIR}/zxdg-decoration-client-protocol.h:
 	wayland-scanner client-header > $@ \
 		< /usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml
 
@@ -51,25 +60,23 @@ zxdg-decoration-client-protocol.h:
 # normal Makefile stuff
 #---
 
-%.o: %.c
-	${C_COMPILER} ${C_FLAGS} -c $*.c -o $*.o
+${BUILDDIR}/%.o: ${GENSRCDIR}/%.c Makefile ${GENSRCDIR}/*.h
+	${C_COMPILER} ${C_FLAGS} ${INCLUDES} ${SWITCHES} -c ${GENSRCDIR}/$*.c -o ${BUILDDIR}/$*.o
 
-%.o: %.cpp
-	${CXX_COMPILER} ${CXX_FLAGS} -c $*.cpp -o $*.o
-
+${BUILDDIR}/%.o: ${SRCDIR}/%.cpp Makefile ${SRCDIR}/*.hpp
+	${CXX_COMPILER} ${CXX_FLAGS} ${INCLUDES} ${SWITCHES} -c ${SRCDIR}/$*.cpp -o ${BUILDDIR}/$*.o
 clean:
-	rm -f *.o
+	rm -f ${BUILDDIR}/*.o
 
 distclean: clean
-	rm -f xdg-shell-protocol.c
-	rm -f xdg-shell-client-protocol.h
-	rm -f zxdg-decoration-protocol.c
-	rm -f zxdg-decoration-client-protocol.h
+	rm -f ${GENSRCDIR}/xdg-shell-protocol.c
+	rm -f ${GENSRCDIR}/xdg-shell-client-protocol.h
+	rm -f ${GENSRCDIR}/zxdg-decoration-protocol.c
+	rm -f ${GENSRCDIR}/zxdg-decoration-client-protocol.h
 
 #---
 # the app
 #---
 
 app: ${WAYLAND_HEADERS} ${OBJS} ${WAYLAND_OBJS}
-	${LINKER} $(OBJS) $(WAYLAND_OBJS) -o ${APPNAME} ${LINK_LIBS}
-
+	${LINKER} ${OBJS} ${WAYLAND_OBJS} -o ${APPNAME} ${LINK_LIBS}

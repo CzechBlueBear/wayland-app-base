@@ -1,0 +1,4 @@
+-I.
+-I/src
+-I/src/generated
+-DUSE_EGL=0

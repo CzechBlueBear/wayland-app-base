@@ -2,18 +2,22 @@
 
 #include <cstdint>
 #include <list>
+#include <map>
+#include <memory>
+#include <string>
 #include <wayland-client.h>
 #include "debug.hpp"
 #include "xdg-shell-client-protocol.h"
 #include "zxdg-decoration-client-protocol.h"
-#include <map>
-#include <string>
 #include <linux/input-event-codes.h>
-#include <memory>
 #include <unistd.h>
 
 #include "frame.hpp"
 #include "draw.hpp"
+
+#if USE_EGL
+#include <wayland-egl.h>
+#endif
 
 struct wl_shm_pool_deleter {
     void operator()(wl_shm_pool* p) { wl_shm_pool_destroy(p); }
@@ -63,7 +67,6 @@ public:
      * The server announces the supported interfaces in the first roundtrip
      * after we connect.
      */
-    template<class T>
     bool has_interface(std::string interface_name) {
         auto cursor = m_interfaces.find(interface_name);
         return (cursor != m_interfaces.end());
@@ -84,7 +87,7 @@ public:
             info(std::string("bound to interface: ") + interface->name);
         }
         else {
-            info(std::string("could not bind to interface: ") + interface->name);
+            info(std::string("would bind to interface, but not available: ") + interface->name);
         }
         return result;
     }
@@ -138,6 +141,19 @@ public:
     wl_surface* get() { return m_surface; }
     void commit();
 };
+
+#if USE_EGL
+
+class EGLWindow : public WaylandObject {
+protected:
+    wl_egl_window* m_window = nullptr;
+public:
+    EGLWindow(wl::Surface& surface, int width, int height);
+    ~EGLWindow();
+    wl_egl_window* get() { return m_window; }
+};
+
+#endif
 
 } // namespace wl
 
@@ -208,6 +224,7 @@ namespace xdg {
         DecorationManager(wl::Registry& registry);
         ~DecorationManager();
         zxdg_decoration_manager_v1* get() { return m_manager; }
+        static bool is_supported(wl::Registry& registry);
     };
 
     class ToplevelDecoration : public wl::WaylandObject {
@@ -236,10 +253,12 @@ protected:
 public:
     Display();
     wl::Connection& get_connection() { return *m_connection; }
+    wl::Registry& get_registry() { return *m_registry; }
     wl::Compositor& get_compositor() { return *m_compositor; }
     wl::Shm& get_shm() { return *m_shm; }
     wl::Seat& get_seat() { return *m_seat; }
     xdg::wm::Base& get_wm_base() { return *m_wm_base; }
+    bool has_decoration_manager() { return !!m_decoration_manager; }
     xdg::DecorationManager& get_decoration_manager() { return *m_decoration_manager; }
 };
 
@@ -249,6 +268,9 @@ protected:
     std::unique_ptr<xdg::Surface>   m_xdg_surface;
     std::unique_ptr<xdg::Toplevel>  m_toplevel;
     std::unique_ptr<xdg::ToplevelDecoration> m_decoration;
+#if USE_EGL
+    std::unique_ptr<wl::EGLWindow>  m_egl_window;
+#endif
 public:
     Window(wayland::Display& display);
     ~Window() {}
