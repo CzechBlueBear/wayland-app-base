@@ -72,25 +72,14 @@ public:
         return (cursor != m_interfaces.end());
     }
 
-    /**
-     * Requests the given Wayland interface with specified version,
-     * and announces the use of it to the Wayland server.
-     * Returns the structure representing the interface.
-     * Returns null if this fails (the server does not support the interface).
-     */
-    template<class T>
-    T* bind(const wl_interface* interface, uint32_t version) {
-        auto cursor = m_interfaces.find(interface->name);
-        if (cursor == m_interfaces.end()) { return nullptr; }
-        auto result = (T*)(wl_registry_bind(m_registry, cursor->second, interface, version));
-        if (result) {
-            info(std::string("bound to interface: ") + interface->name);
-        }
-        else {
-            info(std::string("would bind to interface, but not available: ") + interface->name);
-        }
-        return result;
-    }
+    /// Requests the given Wayland interface with specified version,
+    /// and announces the use of it to the Wayland server.
+    /// Returns a pointer to a structure representing the interface
+    /// (the caller must know what to cast the pointer to).
+    /// The resulting structure must be later destroyed via appropriate method
+    /// (usually some destroy() version specific to the structure).
+    /// On failure, null is returned.
+    void* bind_interface(const wl_interface* interface, uint32_t version);
 };
 
 class Compositor : public WaylandObject {
@@ -140,6 +129,16 @@ public:
     ~Surface();
     wl_surface* get() { return m_surface; }
     void commit();
+    void damage(int32_t x, int32_t y, int32_t width, int32_t height);
+};
+
+class Output : public WaylandObject {
+protected:
+    wl_output* m_output = nullptr;
+public:
+    Output(wl::Registry& registry);
+    ~Output();
+    wl_output* get() { return m_output; }
 };
 
 #if USE_EGL
@@ -248,6 +247,7 @@ protected:
     std::unique_ptr<wl::Compositor>     m_compositor;
     std::unique_ptr<wl::Shm>            m_shm;
     std::unique_ptr<wl::Seat>           m_seat;
+    std::unique_ptr<wl::Output>         m_output;
     std::unique_ptr<xdg::wm::Base>      m_wm_base;
     std::unique_ptr<xdg::DecorationManager> m_decoration_manager;
 public:

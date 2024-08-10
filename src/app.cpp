@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <memory>
 
+// wl::Connection ------------------------------------------------------------
+
 wl::Connection::Connection() {
     m_display = wl_display_connect(nullptr);
     if (!m_display) {
@@ -37,6 +39,8 @@ int wl::Connection::dispatch() {
     return wl_display_dispatch(m_display);
 }
 
+// wl::Registry -------------------------------------------------------------
+
 wl::Registry::Registry(wl::Connection& conn) {
     m_registry = wl_display_get_registry(conn.get());
     if (!m_registry) {
@@ -61,8 +65,26 @@ wl::Registry::~Registry() {
     }
 }
 
+void* wl::Registry::bind_interface(const wl_interface* interface, uint32_t version)
+{
+    auto cursor = m_interfaces.find(interface->name);
+    if (cursor == m_interfaces.end()) { return nullptr; }
+    auto result = wl_registry_bind(m_registry, cursor->second, interface, version);
+    if (result) {
+        info(std::string("bound to interface: ") + interface->name);
+    }
+    else {
+        info(std::string("would bind to interface, but not available: ") + interface->name);
+    }
+    return result;
+}
+
+// wl::Compositor ------------------------------------------------------------
+
 wl::Compositor::Compositor(Registry& registry) {
-    m_compositor = registry.bind<wl_compositor>(&wl_compositor_interface, API_VERSION);
+    m_compositor = reinterpret_cast<wl_compositor*>(
+        registry.bind_interface(&wl_compositor_interface, API_VERSION)
+    );
 }
 
 wl::Compositor::~Compositor() {
@@ -71,8 +93,15 @@ wl::Compositor::~Compositor() {
     }
 }
 
+// wl::Shm ------------------------------------------------------------------
+
 wl::Shm::Shm(Registry& registry) {
-    m_shm = registry.bind<wl_shm>(&wl_shm_interface, API_VERSION);
+    m_shm = reinterpret_cast<wl_shm*>(
+        registry.bind_interface(&wl_shm_interface, API_VERSION)
+    );
+    if (!m_shm) {
+        throw std::runtime_error("wl::Shm: could not bind to wl_shm");
+    }
 }
 
 wl::Shm::~Shm() {
@@ -81,8 +110,12 @@ wl::Shm::~Shm() {
     }
 }
 
+// wl::Seat -----------------------------------------------------------------
+
 wl::Seat::Seat(Registry& registry) {
-    m_seat = registry.bind<wl_seat>(&wl_seat_interface, API_VERSION);
+    m_seat = reinterpret_cast<wl_seat*>(
+        registry.bind_interface(&wl_seat_interface, API_VERSION)
+    );
     if (!m_seat) {
         throw std::runtime_error("wl::Seat: could not bind to wl_seat");
     }
@@ -120,8 +153,12 @@ wl::Seat::~Seat() {
     }
 }
 
+// xdg::wm::Base ------------------------------------------------------------
+
 xdg::wm::Base::Base(wl::Registry& registry) {
-    m_base = registry.bind<xdg_wm_base>(&xdg_wm_base_interface, API_VERSION);
+    m_base = reinterpret_cast<xdg_wm_base*>(
+        registry.bind_interface(&xdg_wm_base_interface, API_VERSION)
+    );
     if (!m_base) {
         throw std::runtime_error("xdg::wm::Base: could not bind to xdg_wm_base");
     }
@@ -144,6 +181,8 @@ void xdg::wm::Base::pong(uint32_t serial_number) {
     xdg_wm_base_pong(m_base, serial_number);
 }
 
+// wl::Surface --------------------------------------------------------------
+
 wl::Surface::Surface(wl::Compositor& compositor) {
     m_surface = wl_compositor_create_surface(compositor.get());
     if (!m_surface) {
@@ -162,6 +201,30 @@ void wl::Surface::commit() {
     wl_surface_commit(m_surface);
 }
 
+void wl::Surface::damage(int32_t x, int32_t y, int32_t width, int32_t height) {
+    assert(m_surface);
+    wl_surface_damage_buffer(m_surface, x, y, width, height);
+}
+
+// wl::Output ---------------------------------------------------------------
+
+wl::Output::Output(wl::Registry& registry) {
+    m_output = reinterpret_cast<wl_output*>(
+        registry.bind_interface(&wl_output_interface, 3)
+    );
+    if (!m_output) {
+        throw std::runtime_error("wl::Output: could not bind to wl_output");
+    }
+}
+
+wl::Output::~Output() {
+    if (m_output) {
+        wl_output_destroy(m_output);
+    }
+}
+
+// wl::EGLWindow ------------------------------------------------------------
+
 #if USE_EGL
 
 wl::EGLWindow::EGLWindow(wl::Surface& surface, int width, int height) {
@@ -172,6 +235,8 @@ wl::EGLWindow::EGLWindow(wl::Surface& surface, int width, int height) {
 }
 
 #endif
+
+// xdg::Surface -------------------------------------------------------------
 
 xdg::Surface::Surface(xdg::wm::Base& base, wl::Surface& low_surface) {
     m_surface = xdg_wm_base_get_xdg_surface(base.get(), low_surface.get());
@@ -206,6 +271,8 @@ void xdg::Surface::set_window_geometry(int32_t x, int32_t y, int32_t width, int3
     assert(m_surface);
     xdg_surface_set_window_geometry(m_surface, x, y, width, height);
 }
+
+// xdg::Toplevel ------------------------------------------------------------
 
 xdg::Toplevel::Toplevel(xdg::Surface& surface) {
     m_toplevel = xdg_surface_get_toplevel(surface.get());
@@ -244,12 +311,16 @@ void xdg::Toplevel::set_title(std::string title) {
     xdg_toplevel_set_title(m_toplevel, title.c_str());
 }
 
+// xdg::DecorationManager ---------------------------------------------------
+
 bool xdg::DecorationManager::is_supported(wl::Registry& registry) {
     return (registry.has_interface("zxdg_decoration_manager_v1"));
 }
 
 xdg::DecorationManager::DecorationManager(wl::Registry& registry) {
-    m_manager = registry.bind<zxdg_decoration_manager_v1>(&zxdg_decoration_manager_v1_interface, API_VERSION);
+    m_manager = reinterpret_cast<zxdg_decoration_manager_v1*>(
+        registry.bind_interface(&zxdg_decoration_manager_v1_interface, API_VERSION)
+    );
     if (!m_manager) {
         throw std::runtime_error("xdg::DecorationManager: could not bind to zxdg_decoration_manager_v1");
     }
@@ -258,6 +329,8 @@ xdg::DecorationManager::DecorationManager(wl::Registry& registry) {
 xdg::DecorationManager::~DecorationManager() {
     zxdg_decoration_manager_v1_destroy(m_manager);
 }
+
+// xdg::ToplevelDecoration --------------------------------------------------
 
 xdg::ToplevelDecoration::ToplevelDecoration(xdg::DecorationManager& manager, xdg::Toplevel& toplevel) {
     m_decoration = zxdg_decoration_manager_v1_get_toplevel_decoration(manager.get(), toplevel.get());
@@ -277,6 +350,8 @@ void xdg::ToplevelDecoration::set_server_side_mode() {
     zxdg_toplevel_decoration_v1_set_mode(m_decoration, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 }
 
+// wayland::Display ---------------------------------------------------------
+
 wayland::Display::Display() {
     m_connection = std::make_unique<wl::Connection>();
     m_registry = std::make_unique<wl::Registry>(*m_connection);
@@ -288,11 +363,16 @@ wayland::Display::Display() {
     m_compositor = std::make_unique<wl::Compositor>(*m_registry);
     m_shm = std::make_unique<wl::Shm>(*m_registry);
     m_seat = std::make_unique<wl::Seat>(*m_registry);
+    m_output = std::make_unique<wl::Output>(*m_registry);
     m_wm_base = std::make_unique<xdg::wm::Base>(*m_registry);
+
+    // beware; some compositors, notably GNOME, do not have this whole interface
     if (xdg::DecorationManager::is_supported(*m_registry)) {
         m_decoration_manager = std::make_unique<xdg::DecorationManager>(*m_registry);
     }
 }
+
+// wayland::Window ----------------------------------------------------------
 
 wayland::Window::Window(wayland::Display& display) {
     m_surface = std::make_unique<wl::Surface>(display.get_compositor());
@@ -303,6 +383,8 @@ wayland::Window::Window(wayland::Display& display) {
             display.get_decoration_manager(), *m_toplevel);
     }
 }
+
+// WaylandApp ---------------------------------------------------------------
 
 WaylandApp* WaylandApp::the_app = nullptr;
 
