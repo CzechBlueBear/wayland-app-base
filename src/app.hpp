@@ -45,9 +45,20 @@ private:
 public:
     Connection();
     ~Connection();
+    operator wl_display*() { return m_display; }
     wl_display* get() { return m_display; }
     void roundtrip();
-    int dispatch();
+
+    /// Handles all currently pending incoming events on the connection,
+    /// calling appropriate callbacks and updating object states.
+    int dispatch_events();
+
+    /// Flushes outgoing events.
+    void flush_events();
+
+    /// Returns the file descriptor of the connection, useful for waiting
+    /// for events with poll() or similar call.
+    int get_fd();
 };
 
 /**
@@ -121,6 +132,8 @@ public:
     bool is_touch_supported() const { return m_touch_supported; }
 };
 
+class Region;
+
 class Surface : public WaylandObject {
 protected:
     wl_surface* m_surface = nullptr;
@@ -130,6 +143,8 @@ public:
     wl_surface* get() { return m_surface; }
     void commit();
     void damage(int32_t x, int32_t y, int32_t width, int32_t height);
+    void set_opaque_region(Region& region);
+    void remove_opaque_region();
 };
 
 class Output : public WaylandObject {
@@ -139,6 +154,20 @@ public:
     Output(wl::Registry& registry);
     ~Output();
     wl_output* get() { return m_output; }
+};
+
+/// Represents an area composed of one or more rectangles;
+/// used, among others, for marking opaque and input-sensitive areas.
+/// @see https://wayland-book.com/surfaces-in-depth/surface-regions.html
+class Region : public WaylandObject {
+protected:
+    wl_region* m_region = nullptr;
+public:
+    Region(wl::Compositor& compositor);
+    ~Region();
+    wl_region* get() { return m_region; }
+    void add(int32_t x, int32_t y, int32_t width, int32_t height);
+    void subtract(int32_t x, int32_t y, int32_t width, int32_t height);
 };
 
 #if USE_EGL
@@ -162,7 +191,7 @@ namespace xdg {
         /// Base interface of the window manager.
         class Base : public wl::WaylandObject {
         protected:
-            xdg_wm_base* m_base = nullptr;
+            struct xdg_wm_base* m_base = nullptr;
             struct xdg_wm_base_listener m_listener = { 0 };
         public:
             const uint32_t API_VERSION = 1;
@@ -176,7 +205,7 @@ namespace xdg {
 
     class Surface : public wl::WaylandObject {
     protected:
-        xdg_surface* m_surface = nullptr;
+        struct xdg_surface* m_surface = nullptr;
         struct xdg_surface_listener m_listener = { 0 };
         uint32_t m_last_configure_event_serial = 0;
         bool m_configure_event_pending = false;
@@ -192,7 +221,7 @@ namespace xdg {
     // The Wayland equivalent of a window encapsulating a surface.
     class Toplevel : public wl::WaylandObject {
     protected:
-        xdg_toplevel* m_toplevel = nullptr;
+        struct xdg_toplevel* m_toplevel = nullptr;
         struct xdg_toplevel_listener m_listener = { 0 };
         bool m_close_requested = false;
         bool m_configure_requested = false;
@@ -217,7 +246,7 @@ namespace xdg {
 
     class DecorationManager : public wl::WaylandObject {
     protected:
-        zxdg_decoration_manager_v1* m_manager = nullptr;
+        struct zxdg_decoration_manager_v1* m_manager = nullptr;
         const int API_VERSION = 1;
     public:
         DecorationManager(wl::Registry& registry);
@@ -228,7 +257,7 @@ namespace xdg {
 
     class ToplevelDecoration : public wl::WaylandObject {
     protected:
-        zxdg_toplevel_decoration_v1* m_decoration = nullptr;
+        struct zxdg_toplevel_decoration_v1* m_decoration = nullptr;
     public:
         ToplevelDecoration(xdg::DecorationManager& manager, xdg::Toplevel& toplevel);
         ~ToplevelDecoration();
@@ -259,7 +288,7 @@ public:
     wl::Seat& get_seat() { return *m_seat; }
     xdg::wm::Base& get_wm_base() { return *m_wm_base; }
     bool has_decoration_manager() { return !!m_decoration_manager; }
-    xdg::DecorationManager& get_decoration_manager() { return *m_decoration_manager; }
+    xdg::DecorationManager& get_decoration_manager();
 };
 
 class Window {

@@ -7,6 +7,7 @@
 #include <sys/mman.h>
 #include <stdexcept>
 #include <memory>
+#include <wayland-client-protocol.h>
 
 // wl::Connection ------------------------------------------------------------
 
@@ -34,15 +35,25 @@ void wl::Connection::roundtrip() {
     wl_display_roundtrip(m_display);
 }
 
-int wl::Connection::dispatch() {
+int wl::Connection::dispatch_events() {
     assert(m_display);
     return wl_display_dispatch(m_display);
+}
+
+void wl::Connection::flush_events() {
+    assert(m_display);
+    wl_display_flush(m_display);
+}
+
+int wl::Connection::get_fd() {
+    assert(m_display);
+    return wl_display_get_fd(m_display);
 }
 
 // wl::Registry -------------------------------------------------------------
 
 wl::Registry::Registry(wl::Connection& conn) {
-    m_registry = wl_display_get_registry(conn.get());
+    m_registry = wl_display_get_registry(conn);
     if (!m_registry) {
         throw std::runtime_error("wl::Registry: wl_display_get_registry() failed: " + errno_to_string());
     }
@@ -206,6 +217,16 @@ void wl::Surface::damage(int32_t x, int32_t y, int32_t width, int32_t height) {
     wl_surface_damage_buffer(m_surface, x, y, width, height);
 }
 
+void wl::Surface::set_opaque_region(Region& region) {
+    assert(m_surface);
+    wl_surface_set_opaque_region(m_surface, region.get());
+}
+
+void wl::Surface::remove_opaque_region() {
+    assert(m_surface);
+    wl_surface_set_opaque_region(m_surface, NULL);
+}
+
 // wl::Output ---------------------------------------------------------------
 
 wl::Output::Output(wl::Registry& registry) {
@@ -221,6 +242,31 @@ wl::Output::~Output() {
     if (m_output) {
         wl_output_destroy(m_output);
     }
+}
+
+// wl::Region ---------------------------------------------------------------
+
+wl::Region::Region(wl::Compositor& compositor) {
+    m_region = wl_compositor_create_region(compositor.get());
+    if (!m_region) {
+        throw std::runtime_error("wl::Region: wl_compositor_create_region() failed");
+    }
+}
+
+wl::Region::~Region() {
+    if (m_region) {
+        wl_region_destroy(m_region);
+    }
+}
+
+void wl::Region::add(int32_t x, int32_t y, int32_t width, int32_t height) {
+    assert(m_region);
+    wl_region_add(m_region, x, y, width, height);
+}
+
+void wl::Region::subtract(int32_t x, int32_t y, int32_t width, int32_t height) {
+    assert(m_region);
+    wl_region_subtract(m_region, x, y, width, height);
 }
 
 // wl::EGLWindow ------------------------------------------------------------
@@ -370,6 +416,15 @@ wayland::Display::Display() {
     if (xdg::DecorationManager::is_supported(*m_registry)) {
         m_decoration_manager = std::make_unique<xdg::DecorationManager>(*m_registry);
     }
+}
+
+xdg::DecorationManager& wayland::Display::get_decoration_manager()
+{
+    // the decor manager may not be available, better throw than segfault
+    if (!m_decoration_manager) {
+        throw std::runtime_error("wayland::Display: decoration manager not available");
+    }
+    return *m_decoration_manager;
 }
 
 // wayland::Window ----------------------------------------------------------
