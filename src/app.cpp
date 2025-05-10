@@ -531,7 +531,7 @@ void WaylandApp::enter_event_loop() {
     frame->attach(*m_window);
 
     bool need_redraw = true;
-    while (m_display->get_connection().dispatch() != -1) {
+    while (m_display->get_connection().dispatch_events() != -1) {
         revolutions++;
 
         if (m_close_requested) {
